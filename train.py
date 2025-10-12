@@ -19,10 +19,189 @@ import os
 from pathlib import Path
 import warnings
 import torchmetrics
+import json
+import psutil
+import time
+
+
+
+import psutil
+import torch
+import csv
+import time
+from pathlib import Path
+import threading
+import pandas as pd
+
+
+
+class ResourceLogger:
+    def __init__(self, interval=1.0):
+        cnfg = get_config()
+        self.log_dir = Path(cnfg["resource_logging"])
+        self.interval = interval
+        self.running = False
+        self.thread = None
+        self.current_epoch = -1
+        
+        self.start_time = time.time()
+        self.clear_sec_log_flag = False
+
+        self.file_sec = self.log_dir / "usage_seconds.csv"
+        self.file_epoch = self.log_dir / "usage_epochs.csv"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.file_sec.exists():
+            with open(self.file_sec, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+                
+        if not self.file_epoch.exists():
+            with open(self.file_epoch, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+
+    def _get_gpu_stats(self):
+        if torch.cuda.is_available():
+            try:
+                gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                gpu_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                return gpu_mem, gpu_total
+            except Exception:
+                return 0.0, 0.0
+        return 0.0, 0.0
+
+    def mark_epoch(self, epoch):
+        self.current_epoch = epoch
+        
+        # This flag tells the background thread to clean up the per-second log history
+        self.clear_sec_log_flag = True 
+
+        cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory().used / 1024**3
+        gpu, gpu_total = self._get_gpu_stats()
+
+        # Load existing data, handling empty file case
+        if self.file_epoch.exists():
+            try:
+                df = pd.read_csv(self.file_epoch)
+            except pd.errors.EmptyDataError:
+                df = pd.DataFrame(columns=["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+        else:
+            df = pd.DataFrame(columns=["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+
+        # *** CORE FIX: Only keep rows where the epoch is NOT the current one ***
+        df = df[df["epoch"] != epoch]
+
+        # Append the new row with the current resource usage and timestamp
+        new_row = pd.DataFrame([[epoch, time.time(), cpu, ram, gpu, gpu_total]],
+                               columns=df.columns)
+        
+        df = pd.concat([df, new_row], ignore_index=True)
+        df = df.sort_values(by="epoch").reset_index(drop=True)
+
+        # Overwrite the entire file with the updated/re-written list
+        df.to_csv(self.file_epoch, index=False)
+        print(f"Epoch {epoch} marked. Resource usage in usage_epochs.csv has been overwritten for this epoch only.")
+
+    def _run(self):
+        while self.running:
+            # Clean up the per-second log history if a re-run started
+            if self.clear_sec_log_flag and self.current_epoch >= 0:
+                if self.file_sec.exists():
+                    try:
+                        df_sec = pd.read_csv(self.file_sec)
+                    except pd.errors.EmptyDataError:
+                        df_sec = pd.DataFrame(columns=["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+                else:
+                    df_sec = pd.DataFrame(columns=["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+                
+                # --- TRUNCATION LOGIC ---
+                if not df_sec.empty:
+                    
+                    # Find the time of the last log entry *before* the current epoch was called the first time.
+                    # We look for the last entry that has a marker for the previous epoch (N-1).
+                    prev_epoch = self.current_epoch - 1
+                    
+                    # If prev_epoch < 0 (i.e., epoch 0 is reran), we keep nothing.
+                    if prev_epoch < 0:
+                        df_sec = df_sec.iloc[:0]
+                    else:
+                        # Filter to the rows that DON'T contain the current or any later epoch marker
+                        # This should keep only the clean history before the re-run started.
+                        # Note: The marker column is not numeric, so we extract the epoch number.
+                        df_sec["temp_epoch"] = df_sec["epoch_marker"].fillna("").apply(
+                            lambda x: int(x.split("_")[1]) if isinstance(x, str) and x.startswith("epoch_") else -1
+                        )
+                        
+                        # Keep only the rows where the recorded epoch marker is less than the current re-run epoch
+                        df_sec = df_sec[df_sec["temp_epoch"] < self.current_epoch]
+                        df_sec = df_sec.drop(columns=["temp_epoch"])
+
+                # Overwrite the per-second file with the truncated data
+                df_sec.to_csv(self.file_sec, index=False)
+                self.clear_sec_log_flag = False
+                # -------------------------
+            
+            # Append new data point
+            cpu = psutil.cpu_percent()
+            ram = psutil.virtual_memory().used / 1024**3
+            gpu, gpu_total = self._get_gpu_stats()
+            
+            # Using absolute time for robustness in the viewer code, 
+            # which will handle the relative time based on the epoch starts.
+            current_time = time.time() 
+            
+            marker = f"epoch_{self.current_epoch}" if self.current_epoch >= 0 else ""
+                
+            with open(self.file_sec, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([current_time, cpu, ram, gpu, gpu_total, marker])
+            time.sleep(self.interval)
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+# ... (rest of the training code remains the same)
+
+
+EVAL_RESULTS_DIR = "eval_results"
+RESOURCE_PROFILE_FILE = "resource_usage.csv"
+
+def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
+    results_file = config.get("eval_results_file", "eval_results/eval_metrics.json")
+    Path(EVAL_RESULTS_DIR).mkdir(exist_ok=True)
+    entry = {
+        "epoch": epoch,
+        "bleu": float(bleu),
+        "cer": float(cer),
+        "wer": float(wer),
+        "samples": samples
+    }
+   
+    if Path(results_file).exists():
+        with open(results_file, "r") as f:
+            all_results = json.load(f)
+    else:
+        all_results = []
+    
+    all_results = [r for r in all_results if int(r["epoch"]) != int(epoch)]
+    all_results.append(entry)
+    all_results.sort(key=lambda x: int(x["epoch"]))
+    with open(results_file, "w") as f:
+        json.dump(all_results, f, indent=2)
+
 
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
-    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+    eos_idx = eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
     # Precompute the encoder output and reuse it for every step
     encoder_output = model.encode(source, source_mask)
@@ -35,7 +214,7 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
         # build mask for target
         decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
 
-        # calculate output
+        # calcu output
         out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
 
         # get next token
@@ -54,15 +233,16 @@ def run_validation(model,
                    validation_ds,
                    tokenizer_src, tokenizer_tgt,
                    max_len, print_msg, global_step,
-                   writer, device, num_examples=2):
+                   writer, device, epoch, config, num_examples=2):
+
     model.eval()
     count = 0
 
     source_texts = []
     expected = []
     predicted = []
+    samples = []
 
-    #size of the control window
     try:
         # get the console window width
         with os.popen('stty size', 'r') as console:
@@ -72,29 +252,35 @@ def run_validation(model,
         # If we can't get the console width, use 80 as default
         console_width = 80
 
-    # Dont train model during this loop
     with torch.no_grad():
         for batch in validation_ds:
             count += 1
-            encoder_input = batch["encoder_input"].to(device)
-            encoder_mask = batch["encoder_mask"].to(device)
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
 
-            assert encoder_input.size(0) == 1, "Batch size must be 1 for evaluation."
+            # check that the batch size is 1
+            assert encoder_input.size(
+                0) == 1, "Batch size must be 1 for validation"
 
-            model_out = greedy_decode(model, encoder_input, encoder_mask,
-                                      tokenizer_src, tokenizer_tgt,
-                                      max_len, device)
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
-            source_text = batch['src_text'][0]
-            target_text = batch['tgt_text'][0]
+            source_text = batch["src_text"][0]
+            target_text = batch["tgt_text"][0]
             model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
+            source_texts.append(source_text)
+            expected.append(target_text)
+            predicted.append(model_out_text)
+            
+            # Print the source, target and model output
             print_msg('-'*console_width)
-            print_msg(f'SOURCE: {source_text}')
-            print_msg(f'TARGET: {target_text}')
-            print_msg(f'PREDICTED: {model_out_text}')
+            print_msg(f"{f'SOURCE: ':>12}{source_text}")
+            print_msg(f"{f'TARGET: ':>12}{target_text}")
+            print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
+            samples.append({"source": source_text, "target": target_text, "predicted": model_out_text})
 
             if count == num_examples:
+                print_msg('-'*console_width)
                 break
     
     if writer:
@@ -116,8 +302,8 @@ def run_validation(model,
         bleu = metric(predicted, expected)
         writer.add_scalar('validation BLEU', bleu, global_step)
         writer.flush()
-    
-    else: print(f'IM GONNA LICK YOUR PENAR')
+        
+        save_eval_metrics(epoch, bleu, cer, wer, samples, config)
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -181,6 +367,10 @@ def get_model(config, vocab_src_len, vocab_tgt_len):
 def train_model(config):
     device = torch.device("cuda" if torch.cuda.is_available() else 'cpu')
     print(f'Using device {device}')
+    
+    torch.cuda.empty_cache()
+    logger = ResourceLogger(interval=1.0)
+    logger.start()
 
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
 
@@ -205,13 +395,14 @@ def train_model(config):
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
-
     for epoch in range(initial_epoch, config['num_epochs']):
-        torch.cuda.empty_cache()
+        logger.mark_epoch(epoch)
+     
+        # Validation and metric saving
         batch_iterator = tqdm(train_dataloader, desc=f'processing epoch {epoch:02d}')
         run_validation(model, val_dataloader,
                         tokenizer_src, tokenizer_tgt,
-                        config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer, device)
+                        config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer, device, epoch, config)
 
         model.train()
 
@@ -243,7 +434,7 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
-
+        
         #save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f'{epoch:02d}')
         torch.save({
@@ -252,6 +443,8 @@ def train_model(config):
             'optimizer_state_dict': optimizer.state_dict(),
             'global_step': global_step
         }, model_filename)
+    
+    logger.stop()
 
 
 if __name__ == '__main__':
