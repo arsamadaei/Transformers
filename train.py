@@ -43,9 +43,8 @@ class ResourceLogger:
         self.running = False
         self.thread = None
         self.current_epoch = -1
-        
+        self.lock = threading.Lock()
         self.start_time = time.time()
-        self.clear_sec_log_flag = False
 
         self.file_sec = self.log_dir / "usage_seconds.csv"
         self.file_epoch = self.log_dir / "usage_epochs.csv"
@@ -71,95 +70,64 @@ class ResourceLogger:
                 return 0.0, 0.0
         return 0.0, 0.0
 
-    def mark_epoch(self, epoch):
-        self.current_epoch = epoch
-        
-        # This flag tells the background thread to clean up the per-second log history
-        self.clear_sec_log_flag = True 
 
-        cpu = psutil.cpu_percent()
+    def mark_epoch(self, epoch):
+        with self.lock:
+            self.current_epoch = int(epoch)
+        cpu = psutil.cpu_percent(interval=0.1)
         ram = psutil.virtual_memory().used / 1024**3
         gpu, gpu_total = self._get_gpu_stats()
 
-        # Load existing data, handling empty file case
-        if self.file_epoch.exists():
-            try:
-                df = pd.read_csv(self.file_epoch)
-            except pd.errors.EmptyDataError:
-                df = pd.DataFrame(columns=["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
-        else:
-            df = pd.DataFrame(columns=["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
-
-        # *** CORE FIX: Only keep rows where the epoch is NOT the current one ***
-        df = df[df["epoch"] != epoch]
-
-        # Append the new row with the current resource usage and timestamp
-        new_row = pd.DataFrame([[epoch, time.time(), cpu, ram, gpu, gpu_total]],
-                               columns=df.columns)
-        
-        df = pd.concat([df, new_row], ignore_index=True)
-        df = df.sort_values(by="epoch").reset_index(drop=True)
-
-        # Overwrite the entire file with the updated/re-written list
-        df.to_csv(self.file_epoch, index=False)
-        print(f"Epoch {epoch} marked. Resource usage in usage_epochs.csv has been overwritten for this epoch only.")
+        # --- Append row to per-epoch log file ---
+        try:
+            with open(self.file_epoch, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch, time.time(), cpu, ram, gpu, gpu_total])
+        except Exception:
+            pass
 
     def _run(self):
         while self.running:
-            # Clean up the per-second log history if a re-run started
-            if self.clear_sec_log_flag and self.current_epoch >= 0:
-                if self.file_sec.exists():
-                    try:
-                        df_sec = pd.read_csv(self.file_sec)
-                    except pd.errors.EmptyDataError:
-                        df_sec = pd.DataFrame(columns=["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
-                else:
-                    df_sec = pd.DataFrame(columns=["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
-                
-                # --- TRUNCATION LOGIC ---
-                if not df_sec.empty:
-                    
-                    # Find the time of the last log entry *before* the current epoch was called the first time.
-                    # We look for the last entry that has a marker for the previous epoch (N-1).
-                    prev_epoch = self.current_epoch - 1
-                    
-                    # If prev_epoch < 0 (i.e., epoch 0 is reran), we keep nothing.
-                    if prev_epoch < 0:
-                        df_sec = df_sec.iloc[:0]
-                    else:
-                        # Filter to the rows that DON'T contain the current or any later epoch marker
-                        # This should keep only the clean history before the re-run started.
-                        # Note: The marker column is not numeric, so we extract the epoch number.
-                        df_sec["temp_epoch"] = df_sec["epoch_marker"].fillna("").apply(
-                            lambda x: int(x.split("_")[1]) if isinstance(x, str) and x.startswith("epoch_") else -1
-                        )
-                        
-                        # Keep only the rows where the recorded epoch marker is less than the current re-run epoch
-                        df_sec = df_sec[df_sec["temp_epoch"] < self.current_epoch]
-                        df_sec = df_sec.drop(columns=["temp_epoch"])
-
-                # Overwrite the per-second file with the truncated data
-                df_sec.to_csv(self.file_sec, index=False)
-                self.clear_sec_log_flag = False
-                # -------------------------
-            
-            # Append new data point
+            # --- Append new data point ---
             cpu = psutil.cpu_percent()
             ram = psutil.virtual_memory().used / 1024**3
             gpu, gpu_total = self._get_gpu_stats()
-            
-            # Using absolute time for robustness in the viewer code, 
-            # which will handle the relative time based on the epoch starts.
             current_time = time.time() 
             
-            marker = f"epoch_{self.current_epoch}" if self.current_epoch >= 0 else ""
-                
-            with open(self.file_sec, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([current_time, cpu, ram, gpu, gpu_total, marker])
+            with self.lock:
+                marker = f"epoch_{self.current_epoch}" if self.current_epoch >= 0 else ""
+
+            try:
+                with open(self.file_sec, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([current_time, cpu, ram, gpu, gpu_total, marker])
+            except Exception:
+                pass
+            
             time.sleep(self.interval)
 
     def start(self):
+        # --- Clear and initialize files ---
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        try: 
+            with open(self.file_sec, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+        except Exception:
+            pass
+
+        try:
+            with open(self.file_epoch, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+        except Exception:
+            pass
+
+
+        # --- reset counter ---
+        with self.lock:
+            self.current_epoch = -1
+
         if not self.running:
             self.running = True
             self.thread = threading.Thread(target=self._run, daemon=True)
@@ -169,15 +137,15 @@ class ResourceLogger:
         self.running = False
         if self.thread:
             self.thread.join()
-# ... (rest of the training code remains the same)
+            self.thread = None
 
 
 EVAL_RESULTS_DIR = "eval_results"
-RESOURCE_PROFILE_FILE = "resource_usage.csv"
 
 def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
-    results_file = config.get("eval_results_file", "eval_results/eval_metrics.json")
-    Path(EVAL_RESULTS_DIR).mkdir(exist_ok=True)
+    results_file = Path(config.get("eval_results_file", "eval_results/eval_metrics.json"))
+    Path(EVAL_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+    results_file.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "epoch": epoch,
         "bleu": float(bleu),
@@ -186,15 +154,24 @@ def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
         "samples": samples
     }
    
-    if Path(results_file).exists():
-        with open(results_file, "r") as f:
-            all_results = json.load(f)
+    # At the beginning of a run (epoch 0) clear the file and write only this entry.
+    if int(epoch) == 0:
+        all_results = [entry]
     else:
-        all_results = []
-    
-    all_results = [r for r in all_results if int(r["epoch"]) != int(epoch)]
+        if results_file.exists():
+            try:
+                with open(results_file, "r") as f:
+                    all_results = json.load(f)
+            except Exception:
+                all_results = []
+        else:
+            all_results = []
+
+    # replace any existing entry for this epoch, then append and sort
+    all_results = [r for r in all_results if int(r.get("epoch", -1)) != int(epoch)]
     all_results.append(entry)
     all_results.sort(key=lambda x: int(x["epoch"]))
+
     with open(results_file, "w") as f:
         json.dump(all_results, f, indent=2)
 
@@ -259,10 +236,11 @@ def run_validation(model,
             encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
 
             # check that the batch size is 1
-            assert encoder_input.size(
-                0) == 1, "Batch size must be 1 for validation"
+            assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
 
-            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+            model_out = greedy_decode(model, encoder_input, encoder_mask, 
+                                      tokenizer_src, tokenizer_tgt,
+                                      max_len, device)
 
             source_text = batch["src_text"][0]
             target_text = batch["tgt_text"][0]
@@ -277,6 +255,8 @@ def run_validation(model,
             print_msg(f"{f'SOURCE: ':>12}{source_text}")
             print_msg(f"{f'TARGET: ':>12}{target_text}")
             print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
+
+            # Save these sample sentences as performance data
             samples.append({"source": source_text, "target": target_text, "predicted": model_out_text})
 
             if count == num_examples:
@@ -284,26 +264,41 @@ def run_validation(model,
                 break
     
     if writer:
-        # Evaluate the character error rate
-        # Compute the char error rate 
+        # --- Evaluate the character error rate ---
         metric = torchmetrics.CharErrorRate()
         cer = metric(predicted, expected)
         writer.add_scalar('validation cer', cer, global_step)
         writer.flush()
 
-        # Compute the word error rate
+        # --- Compute the word error rate ---
         metric = torchmetrics.WordErrorRate()
         wer = metric(predicted, expected)
         writer.add_scalar('validation wer', wer, global_step)
         writer.flush()
 
-        # Compute the BLEU metric
-        metric = torchmetrics.BLEUScore()
-        bleu = metric(predicted, expected)
-        writer.add_scalar('validation BLEU', bleu, global_step)
+        # --- Tokenize input for BLEU ---
+        def tokenize_bleu(s):
+            s = s.replace('[SOS]', '').replace('[EOS]', '').replace('[PAD]', '')
+            s = s.strip()
+            return s.split() if s != "" else []
+
+        predicted_tokens = [tokenize_bleu(p) for p in predicted]
+        expected_tokens = [[tokenize_bleu(t)] for t in expected]
+
+        # torchmetrics.BLEUScore expects strings by default (it will tokenize them),
+        # so join token lists back into space-separated strings.
+        predicted_strs = [" ".join(toks) for toks in predicted_tokens]
+        expected_strs = [[" ".join(toks) for toks in refs] for refs in expected_tokens]
+
+        # --- Compute the BLEU metric ---
+        metric = torchmetrics.BLEUScore(n_gram=4)
+        bleu = metric(predicted_strs, predicted_strs)
+        writer.add_scalar('validation BLEU', float(bleu), global_step)
         writer.flush()
         
+        # --- Save eval metrics as performance data ---
         save_eval_metrics(epoch, bleu, cer, wer, samples, config)
+
 
 def get_all_sentences(ds, lang):
     for item in ds:

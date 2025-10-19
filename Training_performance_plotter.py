@@ -1,82 +1,423 @@
+# Training_performance_plotter.py
 import sys
 import pandas as pd
 import numpy as np
+
 from pathlib import Path
-from PyQt6 import QtCore, QtWidgets
+import psutil
+from PyQt6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
+
 import json
+import warnings
+
+import torch
+from torchmetrics.text.bleu import BLEUScore
+import torch.nn as nn
+import threading
+import time
+import math
+
+# Altair kept for compatibility if train.py expects it
+import altair as alt
+
+warnings.filterwarnings("ignore")
+
+try:
+    from config import get_config, get_weights_file_path
+    from train import get_model, get_ds, greedy_decode
+    from tokenizers import Tokenizer
+    
+except ImportError as e:
+    print(f"Attention visualization components failed to import: {e}. Attention tab may not function.")
+
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ATTENTION_MODEL_LOADED = False
+model = None
+vocab_src = None
+vocab_tgt = None
+val_dataloader = None
+config = None
+SOURCE_TEXT = "No data loaded."
+TARGET_TEXT = "No data loaded."
+ATTN_LAYERS = [0, 1, 2, 3, 4, 5]
+
+
+# --- Calculate BLEU score ---
+def get_bleuscore(predicted: list, expected: list):
+    bleu = BLEUScore()
+    print(f"predicted: {TARGET_TEXT}\nexpected: {SOURCE_TEXT}")
+    
+    return bleu(predicted, expected)
+
+# ==========================================================
+# --- PyQtGraph Heatmap Widget ---
+# ==========================================================
+
+class AttentionHeatmapWidget(pg.PlotWidget):
+    """A widget that renders a Pandas DataFrame as a PyQtGraph Heatmap."""
+    def __init__(self, df: pd.DataFrame, row_tokens: list, col_tokens: list, title: str, parent=None):
+        super().__init__(parent, title=title)
+
+        self.setMinimumSize(400, 450)
+        self.setMaximumHeight(450)
+        self.setBackground('w')
+        self.setAspectLocked(False) 
+
+        # 1. Reshape the DataFrame back into a matrix
+        if df.empty:
+            self.addItem(pg.TextItem("No Attention Data.", anchor=(0.5, 0.5), color=(255, 0, 0)))
+            return
+
+        max_row = df['row'].max() + 1
+        max_col = df['column'].max() + 1
+        matrix = np.zeros((max_row, max_col))
+
+        for _, row in df.iterrows():
+            matrix[int(row['row']), int(row['column'])] = row['value']
+
+        # 2. Create the ImageItem (Heatmap)
+        img = pg.ImageItem(matrix)
+        img.setRect(0, 0, max_col, max_row)
+        self.addItem(img)
+        
+        # 3. Set the color map (Two shades of blue)
+        pos = np.linspace(0.0, 1.0, 2)
+        colors = np.array([
+            (20, 20, 100, 255),    # Dark Blue (RGBA)
+            (50, 150, 255, 255)    # Bright Blue (RGBA)
+        ])
+
+        cmap = pg.ColorMap(pos, colors)
+        lut = cmap.getLookupTable(0.0, 1.0, 256)
+        img.setLookupTable(lut)
+
+        # 4. Configure Axes with Token Labels and Rotation
+
+        row_tokens_clean = [t.replace("<", "").replace(">", "") for t in row_tokens]
+        col_tokens_clean = [t.replace("<", "").replace(">", "") for t in col_tokens]
+
+        # Ticks must use the cleaned, un-rotated text for mapping
+        row_ticks = [(i + 0.5, row_tokens_clean[i]) for i in range(max_row) if i < len(row_tokens_clean)]
+        col_ticks = [(i + 0.5, col_tokens_clean[i]) for i in range(max_col) if i < len(col_tokens_clean)]
+
+        # --- AXIS CONFIGURATION ---
+
+        # Y-Axis (Left) - Standard Configuration
+        self.getAxis('left').setLabel('Key (attended token)', units=None)
+        self.getAxis('left').setTextPen('black')
+        self.getAxis('left').setTickFont(QtGui.QFont("Arial", 8))
+        self.getAxis('left').setTicks([row_ticks])  # Apply Y ticks
+
+        # X-Axis (Bottom) - Vertical Text Fix
+        self.getAxis('bottom').setLabel('Query (attending token)', units=None)
+        self.getAxis('bottom').setTextPen('black')
+
+        font = QtGui.QFont("Arial", 8)
+        self.getAxis('bottom').setTickFont(font)
+
+        # Apply X ticks
+        self.getAxis('bottom').setTicks([col_ticks])
+        
+
+            
+        vb = self.getViewBox()
+        vb.setRange(xRange=(0, max_col), yRange=(0, max_row), padding=0.02)
+
+        vb.invertY(True)
+        
+        vb.setLimits(xMin=0, xMax=max_col, yMin=0, yMax=max_row, minXRange=0.5, minYRange=0.5)
+
+        # 5. Add a ColorBar
+        bar = pg.ColorBarItem(values=(0, matrix.max()), interactive=False)
+        bar.setColorMap(cmap)
+        self.addItem(bar)
+
+        bar.setImageItem(img, insert_in=self.getPlotItem())
+
+
+# ==========================================================
+# --- ATTENTION UTILITY FUNCTIONS ---
+# ==========================================================
+
+def load_next_batch(model, val_dataloader, vocab_src, vocab_tgt, config, device):
+    """
+    Loads the next batch from the validation set and runs greedy_decode
+    to populate the attention_scores cache, as done in the user's example.
+    """
+    batch = next(iter(val_dataloader))
+    encoder_input = batch["encoder_input"].to(device)
+    encoder_mask = batch["encoder_mask"].to(device)
+    decoder_input = batch["decoder_input"].to(device)
+
+    encoder_input_tokens = [vocab_src.id_to_token(idx) for idx in encoder_input[0].cpu().numpy()]
+    decoder_input_tokens = [vocab_tgt.id_to_token(idx) for idx in decoder_input[0].cpu().numpy()]
+
+    assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
+
+    # Note: greedy_decode is called later from load_model_and_generate_data (we do not call it here)
+    return batch, encoder_input_tokens, decoder_input_tokens
+
+
+def mtx2df(m, max_row, max_col, row_tokens, col_tokens):
+    # Convert matrix to dataframe (retains user's utility function)
+    return pd.DataFrame(
+        [
+            (
+                r,
+                c,
+                float(m[r, c]),
+                "%.3d %s" % (r, row_tokens[r] if len(row_tokens) > r else "<blank>"),
+                "%.3d %s" % (c, col_tokens[c] if len(col_tokens) > c else "<blank>"),
+            )
+            for r in range(m.shape[0])
+            for c in range(m.shape[1])
+            if r < max_row and c < max_col
+        ],
+        columns=["row", "column", "value", "row_token", "col_token"],
+    )
+
+
+def get_final_attn_map(attn_type: str, layer: int):
+    """Return a single attention map by averaging all heads in a layer."""
+    global model
+    if attn_type == "encoder":
+        print(len(model.encoder.layers))
+        attn = model.encoder.layers[layer].self_attention_block.attention_scores
+    elif attn_type == "decoder":
+        attn = model.decoder.layers[layer].self_attention_block.attention_scores
+    elif attn_type == "encoder-decoder":
+        attn = model.decoder.layers[layer].cross_attention_block.attention_scores
+
+    return attn[0].mean(dim=0).data
+
+
+def generate_attention_data(attn_type, layer, row_tokens, col_tokens, max_sentence_len):
+    """Generates the DataFrame and metadata, replacing the Altair chart generation."""
+    df = mtx2df(
+        get_final_attn_map(attn_type, layer),
+        max_sentence_len,
+        max_sentence_len,
+        row_tokens,
+        col_tokens,
+    )
+    title = f"Layer {layer} Final {attn_type.capitalize()} Attention"
+    # Return DataFrame and the original tokens for axis labeling
+    return df, title, row_tokens, col_tokens
+
+def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float = 0.1):
+    """
+    Load model, run greedy_decode on one validation sample, gather attention maps,
+    and measure GPU + cache storage usage during inference.
+
+    Returns:
+        success (bool), message (str), chart_data_list (list), inference_stats (dict)
+    inference_stats keys:
+        - gpu_samples: list of (t_rel_seconds, gpu_gb)
+        - ram_samples: list of (t_rel_seconds, psutil.virtual_memory().used / 1024**3)
+        - predicted_text: str
+        - bleu: float
+    """
+    global ATTENTION_MODEL_LOADED, model, vocab_src, vocab_tgt, config, val_dataloader
+    global SOURCE_TEXT, TARGET_TEXT, ATTN_LAYERS
+
+    chart_data_list = []
+    inference_stats = {
+        "gpu_samples": [],
+        "ram_samples": [],
+        "predicted_text": "<prediction unavailable>",
+        "bleu": 0.0,
+    }
+
+    # --- Cache directories to monitor (actual runtime cache areas) ---
+    CACHE_DIRS = [
+        Path.home() / ".cache" / "torch",
+        Path.home() / ".cache" / "huggingface",
+        Path("/tmp"),
+    ]
+
+
+
+    from config import get_config
+    from train import get_model, get_ds, greedy_decode
+
+    # --- Load config, dataset, and tokenizers ---
+    config = get_config()
+    _, val_dataloader, vocab_src, vocab_tgt = get_ds(config)
+
+    # --- Load model and weights ---
+    model = get_model(config, vocab_src.get_vocab_size(), vocab_tgt.get_vocab_size()).to(device)
+    state = torch.load(weights_path, map_location=device)
+    model.load_state_dict(state['model_state_dict'])
+    ATTENTION_MODEL_LOADED = True
+
+    # --- Load next batch ---
+    batch, encoder_input_tokens, decoder_output_tokens = load_next_batch(
+        model, val_dataloader, vocab_src, vocab_tgt, config, device
+    )
+
+    SOURCE_TEXT = batch.get("src_text", [""])[0]
+    TARGET_TEXT = batch.get("tgt_text", [""])[0]
+
+    # Determine max length
+    try:
+        sentence_len_enc = encoder_input_tokens.index("[PAD]")
+    except ValueError:
+        sentence_len_enc = len(encoder_input_tokens)
+    try:
+        sentence_len_dec = decoder_output_tokens.index("[PAD]")
+    except ValueError:
+        sentence_len_dec = len(decoder_output_tokens)
+    max_len = min(config['seq_len'], sentence_len_enc, sentence_len_dec, 20)
+
+    # Threaded decode
+    result_container = {"result": None, "exception": None}
+
+    def run_decode():
+        try:
+            res = greedy_decode(
+                model,
+                batch["encoder_input"].to(device),
+                batch.get("encoder_mask", None).to(device) if batch.get("encoder_mask", None) is not None else None,
+                vocab_src, vocab_tgt, config['seq_len'], device)
+            result_container["result"] = res
+        except Exception as e:
+            result_container["exception"] = e
+
+    decode_thread = threading.Thread(target=run_decode, daemon=True)
+
+    # --- Sampling loop ---
+    decode_thread.start()
+    t0 = time.time()
+    gpu_samples = []
+    ram_samples = []
+
+    while decode_thread.is_alive():
+        t_rel = time.time() - t0
+
+        # --- GPU usage ---
+        if torch.cuda.is_available():
+            try:
+                gpu_gb = torch.cuda.memory_allocated(device) / 1e9
+            except Exception:
+                gpu_gb = 0.0
+        else:
+            gpu_gb = 0.0
+
+        # --- ram  usage ---
+        
+        ram_samples.append((t_rel, psutil.virtual_memory().used / 1024**3))
+        gpu_samples.append((t_rel, gpu_gb))
+        time.sleep(gpu_sample_interval)
+
+  
+    t_rel = time.time() - t0
+    gpu_gb = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0.0
+
+    gpu_samples.append((t_rel, gpu_gb))
+    ram_samples.append((t_rel, psutil.virtual_memory().used / 1024**3))
+
+    inference_stats["gpu_samples"] = gpu_samples
+    inference_stats["ram_samples"] = ram_samples
+
+    if result_container.get("exception"):
+        raise result_container["exception"]
+
+
+    decoded_result = result_container.get("result", None)
+    predicted_text = "<prediction unavailable>"
+    try:
+        if isinstance(decoded_result, str):
+            predicted_text = decoded_result
+        elif isinstance(decoded_result, (list, tuple, np.ndarray)):
+            if len(decoded_result) > 0 and isinstance(decoded_result[0], (int, np.integer)):
+                tokens = [vocab_tgt.id_to_token(int(tok)) for tok in decoded_result]
+                predicted_text = " ".join(tokens).replace("<pad>", "").strip()
+            else:
+                predicted_text = " ".join(map(str, decoded_result)).strip()
+    except Exception:
+        pass
+
+    inference_stats["predicted_text"] = predicted_text
+    inference_stats["bleu"] = get_bleuscore(TARGET_TEXT, predicted_text)
+
+    # --- Generate attention maps ---
+    for layer in ATTN_LAYERS:
+        data_enc = generate_attention_data("encoder", layer, encoder_input_tokens, encoder_input_tokens, max_len)
+        chart_data_list.append(data_enc)
+        data_dec = generate_attention_data("decoder", layer, decoder_output_tokens, decoder_output_tokens, max_len)
+        chart_data_list.append(data_dec)
+        data_cross = generate_attention_data("encoder-decoder", layer, decoder_output_tokens, encoder_input_tokens, max_len)
+        chart_data_list.append(data_cross)
+
+    return True, "Generation successful.", chart_data_list, inference_stats
+
+
+
+
+# =============================================
+# --- QWIDGETS (ResourceMonitorApp) ---
+# =============================================
 
 class ResourceMonitorApp(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # --- File setup ---
+        # [ ... Initialization remains unchanged ... ]
         self.log_dir = Path("eval_results/resource_usage")
         self.file_sec = self.log_dir / "usage_seconds.csv"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Window setup ---
         self.setWindowTitle("Resource Usage Monitor")
         self.resize(1400, 1000)
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        # --- Tabs setup ---
         self.tabs = QtWidgets.QTabWidget()
         layout.addWidget(self.tabs)
 
-        # Tab 1: Per-second plots
         self.tab_pReport = QtWidgets.QWidget()
         self.tabs.addTab(self.tab_pReport, "Performance Reports")
 
-        # Tab 2: Per-epoch plots
         self.tab_LPR = QtWidgets.QWidget()
         self.tabs.addTab(self.tab_LPR, "Linguistic Performance Report")
 
-        # --- Scroll areas for both tabs ---
+        self.tab_attn = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_attn, "Performance During Inference")
+
         self.scroll_pReport, self.scroll_layout_pReport = self._make_scroll_area(self.tab_pReport)
         self.scroll_LPR, self.scroll_layout_LPR = self._make_scroll_area(self.tab_LPR)
+        self.scroll_attn, self.scroll_layout_attn = self._make_scroll_area(self.tab_attn)
 
-        # --- Dash line style fallback ---
         try:
             self.dash_line = QtCore.Qt.PenStyle.DashLine
         except AttributeError:
             self.dash_line = QtCore.Qt.DashLine
 
-        # --- Per-second plots ---
         self.p_cpu_sec, self.cpu_line_sec = self._make_plot("CPU Usage (%)", "b", self.scroll_layout_pReport)
         self.p_gpu_sec, self.gpu_line_sec = self._make_plot("GPU Usage (GB)", "g", self.scroll_layout_pReport)
         self.p_ram_sec, self.ram_line_sec = self._make_plot("RAM Usage (GB)", "orange", self.scroll_layout_pReport)
 
-        # --- Per-epoch plots ---
         self.p_cpu_epoch, self.cpu_line_epoch = self._make_plot("CPU Usage (%) per Epoch", "b", self.scroll_layout_pReport, symbol="o")
         self.p_gpu_epoch, self.gpu_line_epoch = self._make_plot("GPU Usage (GB) per Epoch", "g", self.scroll_layout_pReport, symbol="o")
         self.p_ram_epoch, self.ram_line_epoch = self._make_plot("RAM Usage (GB) per Epoch", "orange", self.scroll_layout_pReport, symbol="o")
 
-        # --- Epoch marker tracking ---
         self.epoch_lines = []
-        
-        # --- Linguistic report plots ---
-        with open("eval_results/eval_metrics.json", "r") as f:
-            data = json.load(f)
 
-        # Extract metrics only
-        metrics = []
-        for entry in data:
-            metrics.append({
-                "epoch": entry["epoch"],
-                "cer": entry["cer"],
-                "wer": entry["wer"],
-                "bleu": entry["bleu"]
-            })
+        try:
+            with open("eval_results/eval_metrics.json", "r") as f:
+                data = json.load(f)
+            df = pd.DataFrame([
+                {"epoch": entry["epoch"], "cer": entry["cer"], "wer": entry["wer"], "bleu": entry["bleu"]}
+                for entry in data
+            ])
+            df.rename(columns={"cer": "CER", "wer": "WER", "bleu": "BLEU"}, inplace=True)
+            epochs = df["epoch"]
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
 
-        # Create DataFrame
-        df = pd.DataFrame(metrics)
-
-        # Make sure column names match what you will use in setData
-        df.rename(columns={"cer": "CER", "wer": "WER", "bleu": "BLEU"}, inplace=True)
-        
         self.plot_linguistic, _ = self._make_plot("Translation Metrics Over Epochs", "k", self.scroll_layout_LPR)
 
         self.line_cer = self.plot_linguistic.plot(pen=pg.mkPen('r', width=2), symbol='o', symbolBrush='r')
@@ -84,26 +425,239 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.line_bleu = self.plot_linguistic.plot(pen=pg.mkPen('g', width=2), symbol='o', symbolBrush='g')
 
         legend = self.plot_linguistic.addLegend()
-        
+
         legend.addItem(self.line_cer, "CER")
         legend.addItem(self.line_wer, "WER")
         legend.addItem(self.line_bleu, "BLEU")
-        
-        # X-axis: epoch
-        epochs = df["epoch"]
 
-        self.line_cer.setData(epochs, df["CER"])
-        self.line_wer.setData(epochs, df["WER"])
-        self.line_bleu.setData(epochs, df["BLEU"])
+        if not df.empty:
+            self.line_cer.setData(epochs, df["CER"])
+            self.line_wer.setData(epochs, df["WER"])
+            self.line_bleu.setData(epochs, df["BLEU"])
 
-        # --- Timer for auto-refresh ---
+        self.weights_path = ""
+        self.attn_content_widgets = []
+        self._setup_attention_tab_controls()
+
+        # Inference-specific small plots (created in _setup_attention_tab_controls)
+        self.infer_gpu_samples = []
+        self.infer_storage_gb = 0.0
+
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_pReport_plots)
-        self.timer.start(1000)  # every second
-        
-        
+        self.timer.start(1000)
 
-    # --- Scrollable area builder ---
+    def _setup_attention_tab_controls(self):
+
+        control_frame = QtWidgets.QFrame()
+        control_layout = QtWidgets.QVBoxLayout(control_frame)
+        control_frame.setFrameShape(QtWidgets.QFrame.Shape.Box)
+        control_frame.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        self.scroll_layout_attn.addWidget(control_frame)
+
+        # Row 1: File Selection
+        file_layout = QtWidgets.QHBoxLayout()
+        self.path_label = QtWidgets.QLabel("Weights Path: No file selected")
+        self.select_button = QtWidgets.QPushButton("Select Weights File (.pt)")
+        self.select_button.clicked.connect(self._select_weights_file)
+        file_layout.addWidget(self.path_label)
+        file_layout.addWidget(self.select_button)
+        control_layout.addLayout(file_layout)
+
+        # Row 2: Generation Button
+        self.submit_button = QtWidgets.QPushButton("Generate Attention Maps")
+        self.submit_button.clicked.connect(self._generate_attention)
+        self.submit_button.setEnabled(False)  # Disabled until file is selected
+        control_layout.addWidget(self.submit_button)
+
+        # Row 3: Status
+        self.status_label = QtWidgets.QLabel("Ready. Select weights file.")
+        control_layout.addWidget(self.status_label)
+
+        # --- Inference summary (source, target, prediction, BLEU) ---
+        self.infer_summary_widget = QtWidgets.QWidget()
+        infer_sum_layout = QtWidgets.QVBoxLayout(self.infer_summary_widget)
+        self.src_label = QtWidgets.QLabel("<b>Source:</b> No data loaded.")
+        self.tgt_label = QtWidgets.QLabel("<b>Target:</b> No data loaded.")
+        self.pred_label = QtWidgets.QLabel("<b>Predicted:</b> <prediction unavailable>")
+        self.bleu_label = QtWidgets.QLabel("<b>BLEU:</b> N/A")
+        for lbl in (self.src_label, self.tgt_label, self.pred_label, self.bleu_label):
+            lbl.setWordWrap(True)
+            infer_sum_layout.addWidget(lbl)
+        control_layout.addWidget(self.infer_summary_widget)
+
+        # --- Small inference plots ---
+        plots_frame = QtWidgets.QFrame()
+        plots_layout = QtWidgets.QHBoxLayout(plots_frame)
+        plots_frame.setMinimumHeight(180)
+
+            # GPU inference plot
+        self.p_gpu_infer = pg.PlotWidget(title="GPU Memory During Inference (GB)")
+        self.p_gpu_infer.setBackground("w")
+        self.p_gpu_infer.showGrid(x=True, y=True, alpha=0.3)
+        self.gpu_infer_line = self.p_gpu_infer.plot(pen=pg.mkPen('g', width=2), symbol='o', symbolBrush='g')
+        plots_layout.addWidget(self.p_gpu_infer)
+
+            # Storage plot
+        self.p_storage_infer = pg.PlotWidget(title="RAM Memory During Inference( GB)")
+        self.p_storage_infer.setBackground("w")
+        self.p_storage_infer.showGrid(x=True, y=True, alpha=0.3)
+        self.storage_line = self.p_storage_infer.plot(pen=pg.mkPen('b', width=2), symbol='o', symbolBrush='b')
+        plots_layout.addWidget(self.p_storage_infer)
+
+        control_layout.addWidget(plots_frame)
+
+        self.scroll_layout_attn.addStretch(1)
+
+    def _select_weights_file(self):
+        file_name, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select Model Weights File", "", "PyTorch Weights (*.pt)")
+        if file_name:
+            self.weights_path = file_name
+            self.path_label.setText(f"Weights Path: {self.weights_path}")
+            self.status_label.setText(f"File selected: {Path(file_name).name}. Click 'Generate Attention Maps'.")
+            self.submit_button.setEnabled(True)
+            self._clear_attention_widgets()
+
+    def _clear_attention_widgets(self):
+        for widget in self.attn_content_widgets:
+            widget.setParent(None)
+            if isinstance(widget, AttentionHeatmapWidget):
+                widget.close()
+                widget.deleteLater()
+        self.attn_content_widgets = []
+
+        global SOURCE_TEXT, TARGET_TEXT
+        SOURCE_TEXT = "No data loaded."
+        TARGET_TEXT = "No data loaded."
+
+        # reset infer summary and plots
+        self.src_label.setText("<b>Source:</b> No data loaded.")
+        self.tgt_label.setText("<b>Target:</b> No data loaded.")
+        self.pred_label.setText("<b>Predicted:</b> <prediction unavailable>")
+        self.bleu_label.setText("<b>BLEU:</b> N/A")
+        self.gpu_infer_line.setData([], [])
+        self.storage_line.setData([], [])
+
+    def _generate_attention(self):
+        if not self.weights_path:
+            self.status_label.setText("Error: No model weights file selected.")
+            return
+
+        self._clear_attention_widgets()
+        self.status_label.setText("Loading model and generating maps from a random validation sample... This may take a moment.")
+        QtWidgets.QApplication.processEvents()
+
+        # Load model and get data: returns (success, message, chart_data_list, inference_stats)
+        success, message, all_chart_data, inference_stats = load_model_and_generate_data(self.weights_path, gpu_sample_interval=0.1)
+
+        if success:
+            self.status_label.setText(f"Success: {message}")
+
+            # show inference stats in UI
+            self._display_attention_maps(all_chart_data, inference_stats)
+        else:
+            self.status_label.setText(f"Failure: {message}")
+
+            # still attempt to display any partial charts if present
+            self._display_attention_maps(all_chart_data, inference_stats)
+
+    def _display_attention_maps(self, chart_data_list: list, inference_stats: dict = None):
+        global ATTENTION_MODEL_LOADED, ATTN_LAYERS
+        if not ATTENTION_MODEL_LOADED:
+            return
+
+        if inference_stats is None:
+            inference_stats = {"gpu_samples": [], "storage_gb": 0.0, "predicted_text": "<prediction unavailable>", "bleu": 0.0}
+
+        # 1. Display Source and Target Text + Predicted + BLEU
+        text_widget = QtWidgets.QWidget()
+        text_layout = QtWidgets.QHBoxLayout(text_widget)
+        src_label = QtWidgets.QLabel(f"<b>Source:</b> {SOURCE_TEXT}")
+        tgt_label = QtWidgets.QLabel(f"<b>Target:</b> {TARGET_TEXT}")
+        src_label.setWordWrap(True)
+        tgt_label.setWordWrap(True)
+        text_layout.addWidget(src_label, 1)
+        text_layout.addWidget(tgt_label, 1)
+
+        insert_index = 1
+        self.scroll_layout_attn.insertWidget(insert_index, text_widget)
+        self.attn_content_widgets.append(text_widget)
+        insert_index += 1
+
+        # Update inference summary labels (also present in the control section)
+        self.src_label.setText(f"<b>Source:</b> {SOURCE_TEXT}")
+        self.tgt_label.setText(f"<b>Target:</b> {TARGET_TEXT}")
+        predicted_text = inference_stats.get("predicted_text", "<prediction unavailable>")
+        bleu_val = inference_stats.get("bleu", 0.0)
+        self.pred_label.setText(f"<b>Predicted:</b> {predicted_text}")
+        self.bleu_label.setText(f"<b>BLEU:</b> {bleu_val:.4f}")
+
+        # --- Plot GPU samples (time vs GB) ---
+        gpu_samples = inference_stats.get("gpu_samples", [])
+        if gpu_samples:
+            times = [t for (t, g) in gpu_samples]
+            values = [g for (t, g) in gpu_samples]
+            self.gpu_infer_line.setData(times, values)
+        else:
+            self.gpu_infer_line.setData([], [])
+
+        # 3. Plot storage usage over time
+        ram_samples = inference_stats.get("ram_samples", [])
+        if ram_samples:
+            st_times = [t for (t, s) in ram_samples]
+            st_vals = [s for (t, s) in ram_samples]
+            self.storage_line.setData(st_times, st_vals)
+        else:
+            self.storage_line.setData([], [])
+
+
+
+        chart_titles = [
+            "Encoder Self-Attention (Averaged Heads)",
+            "Decoder Self-Attention (Averaged Heads)",
+            "Encoder-Decoder Cross-Attention (Averaged Heads)",
+        ]
+
+        # --- Display Charts (6 charts per section) ---
+        chart_index = 0
+
+        for attn_type_index, title in enumerate(chart_titles):
+
+            title_widget = QtWidgets.QLabel(f"<h3>{title}</h3>")
+            self.scroll_layout_attn.insertWidget(insert_index, title_widget)
+            self.attn_content_widgets.append(title_widget)
+            insert_index += 1
+
+            grid = QtWidgets.QGridLayout()
+            grid_widget = QtWidgets.QWidget()
+            grid_widget.setLayout(grid)
+
+            for idx, layer in enumerate(ATTN_LAYERS):
+                row = idx//3
+                col = idx%3
+
+                if chart_index >= len(chart_data_list):
+                    # in case of partial data
+                    df = pd.DataFrame(columns=["row", "column", "value", "row_token", "col_token"])
+                    row_tokens = []
+                    col_tokens = []
+                    chart_title = f"Layer {layer} {title}"
+                else:
+                    data_tuple = chart_data_list[chart_index]
+                    df, chart_title, row_tokens, col_tokens = data_tuple
+
+                chart_widget = AttentionHeatmapWidget(df, row_tokens, col_tokens, chart_title)
+                grid.addWidget(chart_widget, row, col)
+                self.attn_content_widgets.append(chart_widget) 
+                chart_index += 1
+
+            self.scroll_layout_attn.insertWidget(insert_index, grid_widget)
+            self.attn_content_widgets.append(grid_widget)
+            insert_index += 1
+
+        self.scroll_layout_attn.addStretch(1)
+
+
     def _make_scroll_area(self, parent):
         scroll = QtWidgets.QScrollArea(parent)
         scroll.setWidgetResizable(True)
@@ -118,7 +672,6 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
         return scroll, layout
 
-    # --- Plot builder ---
     def _make_plot(self, title, color, layout, symbol=None):
         frame = QtWidgets.QFrame()
         frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
@@ -140,7 +693,6 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         layout.addWidget(frame)
         return plot, line
 
-    # --- Update loops ---
     def update_pReport_plots(self):
         try:
             if not self.file_sec.exists():
@@ -149,7 +701,6 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             if df.empty:
                 return
 
-            # Parse epochs
             if "epoch_marker" in df.columns:
                 df["epoch"] = df["epoch_marker"].fillna("").apply(
                     lambda x: int(x.split("_")[1]) if isinstance(x, str) and x.startswith("epoch_") else np.nan
@@ -161,19 +712,15 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             if df.empty:
                 return
 
-            # Normalize time
             df["time"] -= df["time"].iloc[0]
 
-            # --- Update per-second lines ---
             self._update_visibility(self.p_cpu_sec, self.cpu_line_sec, df["time"], df["cpu_percent"])
             self._update_visibility(self.p_gpu_sec, self.gpu_line_sec, df["time"], df["gpu_gb"])
             self._update_visibility(self.p_ram_sec, self.ram_line_sec, df["time"], df["ram_gb"])
 
-            # --- Epoch markers ---
             self._clear_epoch_lines()
             self._draw_epoch_lines(df)
 
-            # --- Epoch averages ---
             if df["epoch"].notna().any():
                 df_epoch = df.groupby("epoch").agg({
                     "cpu_percent": "mean",
@@ -185,25 +732,21 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
                 self._update_visibility(self.p_ram_epoch, self.ram_line_epoch, df_epoch["epoch"], df_epoch["ram_gb"])
         except Exception as e:
             print("Update error:", e)
-            
-    
+
     def update_linguistic_plot(self):
         try:
             with open("eval_results/eval_metrics.json", "r") as f:
                 data = json.load(f)
             df = pd.DataFrame(data)
 
-            # Check required columns
             for col in ["epoch", "CER", "WER", "BLEU"]:
                 if col not in df.columns:
                     return
 
-            # Update lines
             self.line_cer.setData(df["epoch"], df["CER"])
             self.line_wer.setData(df["epoch"], df["WER"])
             self.line_bleu.setData(df["epoch"], df["BLEU"])
 
-            # Set labels
             self.plot_linguistic.setLabel("left", "Score")
             self.plot_linguistic.setLabel("bottom", "Epoch")
             self.plot_linguistic.setTitle("Translation Metrics Over Epochs")
@@ -211,11 +754,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         except Exception as e:
             print("Update error:", e)
 
-    # --- Utility functions ---
     def _update_visibility(self, plot, line, x, y):
         line.setData(x, y)
         plot.parentWidget().show()
-        
+
     def _draw_epoch_lines(self, df):
         epochs = sorted(df["epoch"].dropna().unique())
         if not epochs:
