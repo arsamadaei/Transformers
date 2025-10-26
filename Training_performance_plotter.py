@@ -8,6 +8,12 @@ import psutil
 from PyQt6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
+from translate import translate
+from train import get_model, get_ds, greedy_decode
+from config import get_config, get_epoch_from_file
+from train import get_model, get_ds, greedy_decode
+from tokenizers import Tokenizer
+
 import json
 import warnings
 
@@ -22,17 +28,8 @@ import math
 import altair as alt
 
 warnings.filterwarnings("ignore")
-
-try:
-    from config import get_config, get_weights_file_path
-    from train import get_model, get_ds, greedy_decode
-    from tokenizers import Tokenizer
-    
-except ImportError as e:
-    print(f"Attention visualization components failed to import: {e}. Attention tab may not function.")
-
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
 ATTENTION_MODEL_LOADED = False
 model = None
 vocab_src = None
@@ -44,19 +41,14 @@ TARGET_TEXT = "No data loaded."
 ATTN_LAYERS = [0, 1, 2, 3, 4, 5]
 
 
-# --- Calculate BLEU score ---
 def get_bleuscore(predicted: list, expected: list):
     bleu = BLEUScore()
-    print(f"predicted: {TARGET_TEXT}\nexpected: {SOURCE_TEXT}")
+    print(f"Target: {predicted}\nexpected: {expected}")
     
     return bleu(predicted, expected)
 
-# ==========================================================
-# --- PyQtGraph Heatmap Widget ---
-# ==========================================================
 
 class AttentionHeatmapWidget(pg.PlotWidget):
-    """A widget that renders a Pandas DataFrame as a PyQtGraph Heatmap."""
     def __init__(self, df: pd.DataFrame, row_tokens: list, col_tokens: list, title: str, parent=None):
         super().__init__(parent, title=title)
 
@@ -65,7 +57,7 @@ class AttentionHeatmapWidget(pg.PlotWidget):
         self.setBackground('w')
         self.setAspectLocked(False) 
 
-        # 1. Reshape the DataFrame back into a matrix
+        # --- Reshape the DataFrame back into a matrix ---
         if df.empty:
             self.addItem(pg.TextItem("No Attention Data.", anchor=(0.5, 0.5), color=(255, 0, 0)))
             return
@@ -77,47 +69,40 @@ class AttentionHeatmapWidget(pg.PlotWidget):
         for _, row in df.iterrows():
             matrix[int(row['row']), int(row['column'])] = row['value']
 
-        # 2. Create the ImageItem (Heatmap)
+        # --- Create the ImageItem (Heatmap) ---
         img = pg.ImageItem(matrix)
         img.setRect(0, 0, max_col, max_row)
         self.addItem(img)
         
-        # 3. Set the color map (Two shades of blue)
+        # --- set the color map (Two shades of blue) ---
         pos = np.linspace(0.0, 1.0, 2)
         colors = np.array([
-            (20, 20, 100, 255),    # Dark Blue (RGBA)
-            (50, 150, 255, 255)    # Bright Blue (RGBA)
+            (10, 24, 74, 255),    #  hot
+            (60, 204, 153, 255)    # cold
         ])
 
         cmap = pg.ColorMap(pos, colors)
         lut = cmap.getLookupTable(0.0, 1.0, 256)
         img.setLookupTable(lut)
+    
+        row_tokens_clean = [t.strip("<>") for t in row_tokens]
+        col_tokens_clean = [t.strip("<>") for t in col_tokens]
 
-        # 4. Configure Axes with Token Labels and Rotation
-
-        row_tokens_clean = [t.replace("<", "").replace(">", "") for t in row_tokens]
-        col_tokens_clean = [t.replace("<", "").replace(">", "") for t in col_tokens]
-
-        # Ticks must use the cleaned, un-rotated text for mapping
         row_ticks = [(i + 0.5, row_tokens_clean[i]) for i in range(max_row) if i < len(row_tokens_clean)]
         col_ticks = [(i + 0.5, col_tokens_clean[i]) for i in range(max_col) if i < len(col_tokens_clean)]
 
         # --- AXIS CONFIGURATION ---
 
-        # Y-Axis (Left) - Standard Configuration
         self.getAxis('left').setLabel('Key (attended token)', units=None)
         self.getAxis('left').setTextPen('black')
         self.getAxis('left').setTickFont(QtGui.QFont("Arial", 8))
-        self.getAxis('left').setTicks([row_ticks])  # Apply Y ticks
+        self.getAxis('left').setTicks([row_ticks])
 
-        # X-Axis (Bottom) - Vertical Text Fix
         self.getAxis('bottom').setLabel('Query (attending token)', units=None)
         self.getAxis('bottom').setTextPen('black')
-
+      
         font = QtGui.QFont("Arial", 8)
         self.getAxis('bottom').setTickFont(font)
-
-        # Apply X ticks
         self.getAxis('bottom').setTicks([col_ticks])
         
 
@@ -129,7 +114,7 @@ class AttentionHeatmapWidget(pg.PlotWidget):
         
         vb.setLimits(xMin=0, xMax=max_col, yMin=0, yMax=max_row, minXRange=0.5, minYRange=0.5)
 
-        # 5. Add a ColorBar
+        # --- ColorBar ---
         bar = pg.ColorBarItem(values=(0, matrix.max()), interactive=False)
         bar.setColorMap(cmap)
         self.addItem(bar)
@@ -137,15 +122,7 @@ class AttentionHeatmapWidget(pg.PlotWidget):
         bar.setImageItem(img, insert_in=self.getPlotItem())
 
 
-# ==========================================================
-# --- ATTENTION UTILITY FUNCTIONS ---
-# ==========================================================
-
 def load_next_batch(model, val_dataloader, vocab_src, vocab_tgt, config, device):
-    """
-    Loads the next batch from the validation set and runs greedy_decode
-    to populate the attention_scores cache, as done in the user's example.
-    """
     batch = next(iter(val_dataloader))
     encoder_input = batch["encoder_input"].to(device)
     encoder_mask = batch["encoder_mask"].to(device)
@@ -161,7 +138,6 @@ def load_next_batch(model, val_dataloader, vocab_src, vocab_tgt, config, device)
 
 
 def mtx2df(m, max_row, max_col, row_tokens, col_tokens):
-    # Convert matrix to dataframe (retains user's utility function)
     return pd.DataFrame(
         [
             (
@@ -183,7 +159,6 @@ def get_final_attn_map(attn_type: str, layer: int):
     """Return a single attention map by averaging all heads in a layer."""
     global model
     if attn_type == "encoder":
-        print(len(model.encoder.layers))
         attn = model.encoder.layers[layer].self_attention_block.attention_scores
     elif attn_type == "decoder":
         attn = model.decoder.layers[layer].self_attention_block.attention_scores
@@ -194,7 +169,6 @@ def get_final_attn_map(attn_type: str, layer: int):
 
 
 def generate_attention_data(attn_type, layer, row_tokens, col_tokens, max_sentence_len):
-    """Generates the DataFrame and metadata, replacing the Altair chart generation."""
     df = mtx2df(
         get_final_attn_map(attn_type, layer),
         max_sentence_len,
@@ -207,18 +181,7 @@ def generate_attention_data(attn_type, layer, row_tokens, col_tokens, max_senten
     return df, title, row_tokens, col_tokens
 
 def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float = 0.1):
-    """
-    Load model, run greedy_decode on one validation sample, gather attention maps,
-    and measure GPU + cache storage usage during inference.
 
-    Returns:
-        success (bool), message (str), chart_data_list (list), inference_stats (dict)
-    inference_stats keys:
-        - gpu_samples: list of (t_rel_seconds, gpu_gb)
-        - ram_samples: list of (t_rel_seconds, psutil.virtual_memory().used / 1024**3)
-        - predicted_text: str
-        - bleu: float
-    """
     global ATTENTION_MODEL_LOADED, model, vocab_src, vocab_tgt, config, val_dataloader
     global SOURCE_TEXT, TARGET_TEXT, ATTN_LAYERS
 
@@ -230,17 +193,12 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
         "bleu": 0.0,
     }
 
-    # --- Cache directories to monitor (actual runtime cache areas) ---
+    # --- Cache directories to monitor ---
     CACHE_DIRS = [
         Path.home() / ".cache" / "torch",
         Path.home() / ".cache" / "huggingface",
         Path("/tmp"),
     ]
-
-
-
-    from config import get_config
-    from train import get_model, get_ds, greedy_decode
 
     # --- Load config, dataset, and tokenizers ---
     config = get_config()
@@ -248,6 +206,7 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
 
     # --- Load model and weights ---
     model = get_model(config, vocab_src.get_vocab_size(), vocab_tgt.get_vocab_size()).to(device)
+    epoch = get_epoch_from_file(config, weights_path)
     state = torch.load(weights_path, map_location=device)
     model.load_state_dict(state['model_state_dict'])
     ATTENTION_MODEL_LOADED = True
@@ -288,10 +247,11 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
     decode_thread = threading.Thread(target=run_decode, daemon=True)
 
     # --- Sampling loop ---
-    decode_thread.start()
     t0 = time.time()
+    decode_thread.start()
     gpu_samples = []
     ram_samples = []
+    t_rel = None
 
     while decode_thread.is_alive():
         t_rel = time.time() - t0
@@ -306,40 +266,28 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
             gpu_gb = 0.0
 
         # --- ram  usage ---
-        
         ram_samples.append((t_rel, psutil.virtual_memory().used / 1024**3))
         gpu_samples.append((t_rel, gpu_gb))
         time.sleep(gpu_sample_interval)
 
   
-    t_rel = time.time() - t0
-    gpu_gb = torch.cuda.memory_allocated(device) / 1e9 if torch.cuda.is_available() else 0.0
-
-    gpu_samples.append((t_rel, gpu_gb))
-    ram_samples.append((t_rel, psutil.virtual_memory().used / 1024**3))
-
     inference_stats["gpu_samples"] = gpu_samples
     inference_stats["ram_samples"] = ram_samples
+    inference_stats["decode_time"] = t_rel
 
     if result_container.get("exception"):
         raise result_container["exception"]
 
-
-    decoded_result = result_container.get("result", None)
-    predicted_text = "<prediction unavailable>"
-    try:
-        if isinstance(decoded_result, str):
-            predicted_text = decoded_result
-        elif isinstance(decoded_result, (list, tuple, np.ndarray)):
-            if len(decoded_result) > 0 and isinstance(decoded_result[0], (int, np.integer)):
-                tokens = [vocab_tgt.id_to_token(int(tok)) for tok in decoded_result]
-                predicted_text = " ".join(tokens).replace("<pad>", "").strip()
-            else:
-                predicted_text = " ".join(map(str, decoded_result)).strip()
-    except Exception:
-        pass
+    t0 = time.time()
+    predicted_text = translate(SOURCE_TEXT, epoch)
+    t_rel = time.time() - t0
 
     inference_stats["predicted_text"] = predicted_text
+    
+    tokenizer = Tokenizer.from_file("tokenizer_fr.json")
+    enc = tokenizer.encode(predicted_text)
+    inference_stats['TPS'] = len(enc.ids) / t_rel
+
     inference_stats["bleu"] = get_bleuscore(TARGET_TEXT, predicted_text)
 
     # --- Generate attention maps ---
@@ -353,12 +301,6 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
 
     return True, "Generation successful.", chart_data_list, inference_stats
 
-
-
-
-# =============================================
-# --- QWIDGETS (ResourceMonitorApp) ---
-# =============================================
 
 class ResourceMonitorApp(QtWidgets.QMainWindow):
     def __init__(self):
@@ -439,7 +381,6 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.attn_content_widgets = []
         self._setup_attention_tab_controls()
 
-        # Inference-specific small plots (created in _setup_attention_tab_controls)
         self.infer_gpu_samples = []
         self.infer_storage_gb = 0.0
 
@@ -455,7 +396,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         control_frame.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
         self.scroll_layout_attn.addWidget(control_frame)
 
-        # Row 1: File Selection
+        # --- File selection ---
         file_layout = QtWidgets.QHBoxLayout()
         self.path_label = QtWidgets.QLabel("Weights Path: No file selected")
         self.select_button = QtWidgets.QPushButton("Select Weights File (.pt)")
@@ -464,13 +405,12 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         file_layout.addWidget(self.select_button)
         control_layout.addLayout(file_layout)
 
-        # Row 2: Generation Button
+        # --- Submit button for generation ---
         self.submit_button = QtWidgets.QPushButton("Generate Attention Maps")
         self.submit_button.clicked.connect(self._generate_attention)
         self.submit_button.setEnabled(False)  # Disabled until file is selected
         control_layout.addWidget(self.submit_button)
 
-        # Row 3: Status
         self.status_label = QtWidgets.QLabel("Ready. Select weights file.")
         control_layout.addWidget(self.status_label)
 
@@ -479,9 +419,13 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         infer_sum_layout = QtWidgets.QVBoxLayout(self.infer_summary_widget)
         self.src_label = QtWidgets.QLabel("<b>Source:</b> No data loaded.")
         self.tgt_label = QtWidgets.QLabel("<b>Target:</b> No data loaded.")
+        self.decoding_time = QtWidgets.QLabel("<b>Decoding Time of Srouce to Target:</b> No data loaded.")
         self.pred_label = QtWidgets.QLabel("<b>Predicted:</b> <prediction unavailable>")
+        self.pred_time = QtWidgets.QLabel("<b>Generation of Tokens Per Second:</b> No data loaded.")
         self.bleu_label = QtWidgets.QLabel("<b>BLEU:</b> N/A")
-        for lbl in (self.src_label, self.tgt_label, self.pred_label, self.bleu_label):
+
+        # --- Add summart widgets one by one ---
+        for lbl in (self.src_label, self.tgt_label, self.decoding_time, self.pred_label, self.pred_time, self.bleu_label):
             lbl.setWordWrap(True)
             infer_sum_layout.addWidget(lbl)
         control_layout.addWidget(self.infer_summary_widget)
@@ -533,7 +477,9 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         # reset infer summary and plots
         self.src_label.setText("<b>Source:</b> No data loaded.")
         self.tgt_label.setText("<b>Target:</b> No data loaded.")
+        self.decoding_time.setText("<b>Decoding Time:</b> No data loaded.")
         self.pred_label.setText("<b>Predicted:</b> <prediction unavailable>")
+        self.pred_time.setText("<b>Generation of Tokens Per Second:</b> No data loaded")
         self.bleu_label.setText("<b>BLEU:</b> N/A")
         self.gpu_infer_line.setData([], [])
         self.storage_line.setData([], [])
@@ -553,7 +499,6 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         if success:
             self.status_label.setText(f"Success: {message}")
 
-            # show inference stats in UI
             self._display_attention_maps(all_chart_data, inference_stats)
         else:
             self.status_label.setText(f"Failure: {message}")
@@ -567,9 +512,9 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             return
 
         if inference_stats is None:
-            inference_stats = {"gpu_samples": [], "storage_gb": 0.0, "predicted_text": "<prediction unavailable>", "bleu": 0.0}
-
-        # 1. Display Source and Target Text + Predicted + BLEU
+            inference_stats = {"gpu_samples": [], "storage_gb": 0.0, "predicted_text": "<prediction unavailable>", "bleu": 0.0, "decode_time": 0.0}
+        
+        # --- Display stats ---
         text_widget = QtWidgets.QWidget()
         text_layout = QtWidgets.QHBoxLayout(text_widget)
         src_label = QtWidgets.QLabel(f"<b>Source:</b> {SOURCE_TEXT}")
@@ -584,13 +529,14 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.attn_content_widgets.append(text_widget)
         insert_index += 1
 
-        # Update inference summary labels (also present in the control section)
         self.src_label.setText(f"<b>Source:</b> {SOURCE_TEXT}")
         self.tgt_label.setText(f"<b>Target:</b> {TARGET_TEXT}")
         predicted_text = inference_stats.get("predicted_text", "<prediction unavailable>")
         bleu_val = inference_stats.get("bleu", 0.0)
         self.pred_label.setText(f"<b>Predicted:</b> {predicted_text}")
         self.bleu_label.setText(f"<b>BLEU:</b> {bleu_val:.4f}")
+        self.decoding_time.setText(f"<b>Decoding Time:</b> {inference_stats['decode_time']:.3f}")
+        self.pred_time.setText(f"<b>Generation of Tokens Per Second:</b> {inference_stats['TPS']:.3f}")
 
         # --- Plot GPU samples (time vs GB) ---
         gpu_samples = inference_stats.get("gpu_samples", [])
@@ -601,7 +547,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         else:
             self.gpu_infer_line.setData([], [])
 
-        # 3. Plot storage usage over time
+        # --- Plot RAM samples (time vs GB) ---
         ram_samples = inference_stats.get("ram_samples", [])
         if ram_samples:
             st_times = [t for (t, s) in ram_samples]
@@ -613,10 +559,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
 
         chart_titles = [
-            "Encoder Self-Attention (Averaged Heads)",
-            "Decoder Self-Attention (Averaged Heads)",
-            "Encoder-Decoder Cross-Attention (Averaged Heads)",
-        ]
+            "Attention Heads",
+            "",
+            ""
+            ]
 
         # --- Display Charts (6 charts per section) ---
         chart_index = 0
@@ -633,8 +579,8 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             grid_widget.setLayout(grid)
 
             for idx, layer in enumerate(ATTN_LAYERS):
-                row = idx//3
-                col = idx%3
+                row = idx // 3
+                col = idx % 3
 
                 if chart_index >= len(chart_data_list):
                     # in case of partial data

@@ -206,6 +206,7 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
 
     return decoder_input.squeeze(0)
 
+
 def run_validation(model,
                    validation_ds,
                    tokenizer_src, tokenizer_tgt,
@@ -405,6 +406,10 @@ def train_model(config):
         for batch in batch_iterator:
             encoder_input = batch['encoder_input'].to(device)
             decoder_input = batch['decoder_input'].to(device)
+
+            # --- apply masks ---
+            # NOTE: The masks are included in the dataframe.
+            
             encoder_mask = batch['encoder_mask'].to(device)
             decoder_mask = batch['decoder_mask'].to(device)
 
