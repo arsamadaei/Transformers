@@ -385,6 +385,9 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.tab_attn = QtWidgets.QWidget()
         self.tabs.addTab(self.tab_attn, "Performance During Inference")
 
+        # Connect tab change signal to update placeholders when Performance Reports tab is selected
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
         # Setup Performance Reports tab with controls and scroll area
         self._setup_performance_reports_tab()
         
@@ -830,6 +833,51 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self._live_mode = False  # Live mode flag
         self._data_loaded = False  # Flag to track if user has made a selection
 
+    def _on_tab_changed(self, index):
+        """Handle tab selection change."""
+        print(f"DEBUG: Tab changed to index {index}")
+        # If Performance Reports tab is selected (index 0), update placeholders
+        if index == 0:
+            print(f"DEBUG: Updating placeholders for Performance Reports tab")
+            self._update_epoch_input_placeholders()
+
+    def _update_epoch_input_placeholders(self):
+        """Update input placeholders to show available epoch range."""
+        print(f"DEBUG: _update_epoch_input_placeholders called")
+        try:
+            if not self.file_sec.exists():
+                print(f"DEBUG: File doesn't exist: {self.file_sec}")
+                self.epoch_start_input.setPlaceholderText("1")
+                self.epoch_end_input.setPlaceholderText("max")
+                return
+            
+            # Read just the epoch_marker column to find range
+            df = pd.read_csv(self.file_sec, usecols=["epoch_marker"])
+            
+            if "epoch_marker" in df.columns:
+                epochs = df["epoch_marker"].dropna().apply(
+                    lambda x: int(x.split("_")[1]) if isinstance(x, str) and x.startswith("epoch_") else None
+                ).dropna()
+                
+                print(f"DEBUG: Found epochs: {list(epochs.unique())[:5]}... min={epochs.min()}, max={epochs.max()}")
+                
+                if not epochs.empty:
+                    min_epoch = int(epochs.min())
+                    max_epoch = int(epochs.max())
+                    self.epoch_start_input.setPlaceholderText(str(min_epoch))
+                    self.epoch_end_input.setPlaceholderText(str(max_epoch))
+                    print(f"DEBUG: Set placeholders to {min_epoch} - {max_epoch}")
+                else:
+                    self.epoch_start_input.setPlaceholderText("1")
+                    self.epoch_end_input.setPlaceholderText("max")
+            else:
+                self.epoch_start_input.setPlaceholderText("1")
+                self.epoch_end_input.setPlaceholderText("max")
+        except Exception:
+            # If anything fails, use defaults
+            self.epoch_start_input.setPlaceholderText("1")
+            self.epoch_end_input.setPlaceholderText("max")
+
     def _apply_epoch_range(self):
         """Apply the epoch range filter from user input."""
         try:
@@ -1220,6 +1268,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
     def _update_average_plots(self):
         """Update the average per-epoch plots. Always shown regardless of per-second selection."""
+        print(f"DEBUG: _update_average_plots called, _epoch_range={self._epoch_range}")
         try:
             if not self.file_sec.exists():
                 # Clear average plots if no data
@@ -1246,13 +1295,23 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             if df.empty:
                 return
 
-            # --- Average per-epoch plots (use ALL data) ---
+            # --- Average per-epoch plots (respect range selection) ---
             if df["epoch"].notna().any():
                 df_epoch = df.groupby("epoch").agg({
                     "cpu_percent": "mean",
                     "gpu_gb": "mean",
                     "ram_gb": "mean",
                 }).reset_index()
+                
+                # Apply the same epoch range filter as per-second plots
+                start_epoch, end_epoch = self._epoch_range
+                print(f"DEBUG: Average plots - filtering by range {start_epoch}-{end_epoch}, df_epoch has {len(df_epoch)} epochs before filter")
+                if start_epoch is not None:
+                    df_epoch = df_epoch[df_epoch["epoch"] >= start_epoch]
+                if end_epoch is not None:
+                    df_epoch = df_epoch[df_epoch["epoch"] <= end_epoch]
+                print(f"DEBUG: Average plots - after filter, df_epoch has {len(df_epoch)} epochs")
+                
                 self._update_visibility(self.p_cpu_epoch, self.cpu_line_epoch, df_epoch["epoch"], df_epoch["cpu_percent"])
                 self._update_visibility(self.p_gpu_epoch, self.gpu_line_epoch, df_epoch["epoch"], df_epoch["gpu_gb"])
                 self._update_visibility(self.p_ram_epoch, self.ram_line_epoch, df_epoch["epoch"], df_epoch["ram_gb"])
