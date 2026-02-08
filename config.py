@@ -11,9 +11,11 @@ def get_config():
         "lang_tgt": "fr",
         "model_folder": "weights",
         "model_basename": "tmodel_",
-        "preload": "28",
+        "preload": None,
         "tokenizer_file": "tokenizer_{0}.json",
-        "experiment_name": "runs/tmodel"
+        "experiment_name": "runs/tmodel",
+        "eval_logging": "eval_results/eval_metrics.json",
+        "resource_logging": "eval_results/resource_usage"
     }
 
 def get_weights_file_path(config, epoch:str):
