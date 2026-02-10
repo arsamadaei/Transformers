@@ -13,6 +13,13 @@ An implementation of the Transformer architecture from the paper ["Attention Is 
 This is a project of mine, that I am using to learn about AI and AI development.
 My goal for this project is to get it efficient enough to rent google colab computers and train the model through google-colab.
 
+I will be documenting my learning by creating and postin high-quality videos on a [YouTube channel](https://www.youtube.com/@OpenML-x2d)
+
+## AI Use
+Since the scope of my project is to learn about AI and the transformer model, I will develop code related to the model myself.
+However, work out of scope of this project, such as app development is done through AI vibe-coding since I have no time or resources to spend myself on app development, and I have no team of developers (but am looking forward to having one).
+I will be 100% transparent with my use of AI when commiting to this project.
+
 ## 🚀 Features
 
 - **Full Transformer Implementation**: Encoder-decoder architecture with multi-head attention
