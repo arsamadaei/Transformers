@@ -16,9 +16,14 @@ My goal for this project is to get it efficient enough to rent google colab comp
 I will be documenting my learning by creating and postin high-quality videos on a [YouTube channel](https://www.youtube.com/@OpenML-x2d)
 
 ## AI Use
+### AI use for writing code
 Since the scope of my project is to learn about AI and the transformer model, I will develop code related to the model myself.
 However, work out of scope of this project, such as app development is done through AI vibe-coding since I have no time or resources to spend myself on app development, and I have no team of developers (but am looking forward to having one).
 I will be 100% transparent with my use of AI when commiting to this project.
+
+### AI use for writing documentation
+I will sometimes use AI for creating documentation files. This is because as a student single handedly working on this project, I do not have enough time to dedicate to creating high quality and well structured documentation files. However, I will make sure to read through and make changes if needed. All these files are reviewed by me as I will have to also use them myself to catch up to the most recent developments and implementation I have made in my code. I will put warning in the file names or inside the documentation letting you know if a file was made using AI.
+
 
 ## 🚀 Features
 
