@@ -42,10 +42,12 @@ I will sometimes use AI for creating documentation files. This is because as a s
 ├── translate.py                  # Translation inference
 ├── dataset.py                    # Data loading and preprocessing
 ├── config.py                     # Configuration settings
+├── processes.py                  # Process time tracking
 ├── Training_performance_plotter  # A performance plotter for training and inference data
 ├── tokenizer_en.json             # English tokenizer
 ├── tokenizer_fr.json             # French tokenizer
 ├── weights/                      # Model checkpoints
+├── Documentation/                # Is a folder containing Document pdfs
 └── logs/                         # Training logs
 ```
 
