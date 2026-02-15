@@ -113,7 +113,13 @@ def create_id(layer: int, len: int=4) -> str:
 class Process(TimeStamp):
     __instances = weakref.WeakSet()
 
-    def __init__(self, name: str, layer: int, _init: int, _term: int, _dis=None):
+    def __init__(self, name: str,
+                 _init: float,
+                 _term: float = -1,
+                 layer: int = 0,
+                 _dis=None,
+                 parent_uid: str|None = None,
+                 subtasks: list = []):
         # layer = 0 means the process does not inhibit parallel processing
         # _term = -1 means the process is ongoing
         super().__init__(_init, _term, _dis)
@@ -122,16 +128,25 @@ class Process(TimeStamp):
 
         # Generate process ID
         self.uid = create_id(self.layer)
+        self.parent_uid = parent_uid
+        self.subtasks = subtasks
 
         Process.__instances.add(self)
-    
-    def to_hirearchial_dict(self) -> dict: 
+
+    def add_subtask(self, process):
+        process.parent_uid = self.uid
+        self.subtasks.append(process.uid)
+
+
+    def to_hirearchial_dict(self) -> dict:
         """
         Converts process to json-style hirearchial dictionary suited for json formatting.
         """
         return { "name"    : self.name,
                  "uid"     : self.uid,
-                 "timeline": self.ts.to_hirearchial_dict()
+                 "parent_uid": self.parent_uid,
+                 "timeline": self.ts.to_hirearchial_dict(),
+                 "subtasks": self.subtasks
                 }
 
     def to_storage_dict(self):
@@ -196,16 +211,20 @@ class Process(TimeStamp):
         _term = timeStamp.get("terminated")
         dis: list = timeStamp.get("disruptions", [])
         _dis = TimeStamp.de_serialize(dis)
+        puid = data.get("parent_uid")
+        sub_tasks = data.get("subtasks")
         
         process = cls( name, 
-                       cls.get_layer_from_uid(uid),
                        _init,
                        _term,
-                       _dis
+                       cls.get_layer_from_uid(uid),
+                       _dis,
+                       puid,
+                       sub_tasks
                       )
 
         return process
-
+    
     @classmethod
     def storeAll(cls, ofile: str="/eval_results/processes.json"):
         """
@@ -279,8 +298,28 @@ class Process(TimeStamp):
         
         return False
 
+    @classmethod
+    def get_topLevelTasks(cls, ofile = None):
+        if ofile is not None:
+            all_processes = cls.loadAll(ofile)
+        
+        else:
+             all_processes = cls.loadAll()
+
+        return [p for p in all_processes if p.parent_uid is None]
+
     @staticmethod
     def clear_storage(ofile: str="/eval_results/processes.json"):
         with open(ofile, 'w') as f:
             json.dump({"processes": []}, f, indent=2)
+
+    @staticmethod
+    def load_parent(ofile = None):
+        if self.parent_uid:
+            return Process.load(self.parent_uid)
+
+    @staticmethod
+    def load_subtasks(ofile = None):
+        return [Process.load(uid) for uid in self.subtasks]
+
 
