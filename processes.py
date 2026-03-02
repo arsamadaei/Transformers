@@ -103,7 +103,7 @@ class TimeStamp:
 
         return _dis
 
-def create_id(layer: int, len: int=4) -> str:
+def create_id(layer: int, len: int=8) -> str:
     hex_chars = '0123456789abcdef'
     randID = ''.join(random.choices(hex_chars, k=len))
 
@@ -145,7 +145,7 @@ class Process(TimeStamp):
         return { "name"    : self.name,
                  "uid"     : self.uid,
                  "parent_uid": self.parent_uid,
-                 "timeline": self.ts.to_hirearchial_dict(),
+                 "timeline": super().to_hirearchial_dict(),
                  "subtasks": self.subtasks
                 }
 
@@ -156,7 +156,7 @@ class Process(TimeStamp):
         """
         return (self.uid, self.to_hirearchial_dict())
 
-    def write(self, ofile: str="/eval_results/processes.json"):
+    def write(self, ofile: str="eval_results/processes.json"):
         """
         Write process information to json file.
         Uses dictionary structure for O(1) lookup by uid.
@@ -164,10 +164,15 @@ class Process(TimeStamp):
         ofile: output file location
         """
 
-        if os.path.exists(ofile):
-            with open(ofile, 'r') as f:
-                data = json.load(f)
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
 
+        if os.path.exists(ofile) and os.path.getsize(ofile) > 0:
+            try:
+                with open(ofile, 'r') as f:
+                    data = json.load(f)
+            except json.JSONDecodeError:
+                data = {"processes": {}}
         else:
             data = {"processes": {}}
 
@@ -181,7 +186,7 @@ class Process(TimeStamp):
             else: 
                 data["processes"][self.uid] = processes
     
-                with open(ofile, 'w') as f:
+                with open(ofile, 'w+') as f:
                     json.dump(data, f, indent=2)
 
                 return ofile
@@ -226,50 +231,68 @@ class Process(TimeStamp):
         return process
     
     @classmethod
-    def storeAll(cls, ofile: str="/eval_results/processes.json"):
+    def storeAll(cls, ofile: str="eval_results/processes.json"):
         """
         Store processes by merging with existing file.
         Only adds/updates changed processes, preserves existing data.
         """
 
-        if os.path.exists(ofile):
-            with open(ofile, 'r') as f:
-                data = json.load(f)
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
+
+        if os.path.exists(ofile) and os.path.getsize(ofile) > 0:
+            try:
+                with open(ofile, 'r') as f:
+                    data = json.load(f)
+            except json.JSONDecodeError:
+                data = {"processes": {}}
         else:
             data = {"processes": {}}
         
         for p in cls.__instances:
             data["processes"][p.uid] = p.to_hirearchial_dict()
         
-        with open(ofile, 'w') as f:
+        with open(ofile, 'w+') as f:
             json.dump(data, f, indent=2)
 
         return ofile
 
     @classmethod
-    def loadAll(cls, ofile: str="/eval_results/processes.json"):
+    def loadAll(cls, ofile: str="eval_results/processes.json"):
         """
         Load all processes in the json file into a list of processes.
         """
 
-        if not os.path.exists(ofile):
+        if not os.path.exists(ofile) or os.path.getsize(ofile) == 0:
             return []
+        
+        # Create directory if it doesn't exist (for future writes)
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
 
-        with open(ofile, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(ofile, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            return []
 
         return [cls.load_dict(p) for p in data.get("processes", {}).values()]
 
     @classmethod
-    def load(cls, uid: str, ofile: str="/eval_results/processes.json"):
+    def load(cls, uid: str, ofile: str="eval_results/processes.json"):
         """
         Load a specific process by UID.
         """
-        if not os.path.exists(ofile):
+        if not os.path.exists(ofile) or os.path.getsize(ofile) == 0:
             return None
+        
+        # Create directory if it doesn't exist (for future writes)
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
 
-        with open(ofile, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(ofile, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            return None
 
         # O(1) lookup - direct dictionary access
         process_data = data.get("processes", {}).get(uid, {})
@@ -277,7 +300,7 @@ class Process(TimeStamp):
         return cls.load_dict(process_data) if process_data else None
 
     @staticmethod
-    def remove(uid: str, ofile: str="/eval_results/processes.json"):
+    def remove(uid: str, ofile: str="eval_results/processes.json"):
         """
         Remove a specific process by UID.
         """
@@ -285,13 +308,16 @@ class Process(TimeStamp):
         if not os.path.exists(ofile):
             return None
         
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
+        
         with open(ofile, 'r') as f:
             data = json.load(f)
 
         if uid in data.get("processes", {}):
             del data["processes"][uid]
 
-            with open(ofile, 'w') as f:
+            with open(ofile, 'w+') as f:
                 json.dump(data, f, indent=2)
             
             return True
@@ -309,7 +335,10 @@ class Process(TimeStamp):
         return [p for p in all_processes if p.parent_uid is None]
 
     @staticmethod
-    def clear_storage(ofile: str="/eval_results/processes.json"):
+    def clear_storage(ofile: str="eval_results/processes.json"):
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(ofile), exist_ok=True)
+        
         with open(ofile, 'w') as f:
             json.dump({"processes": []}, f, indent=2)
 

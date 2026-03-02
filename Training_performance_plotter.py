@@ -26,6 +26,11 @@ import math
 # Altair kept for compatibility if train.py expects it
 import altair as alt
 
+# Import Mindmap for process visualization
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from processes import Mindmap
+
 warnings.filterwarnings("ignore")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
@@ -384,6 +389,11 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
         self.tab_attn = QtWidgets.QWidget()
         self.tabs.addTab(self.tab_attn, "Performance During Inference")
+
+        # Setup Process Mindmap tab
+        self.tab_mindmap = QtWidgets.QWidget()
+        self.tabs.addTab(self.tab_mindmap, "Process Mindmap")
+        self._setup_process_mindmap_tab()
 
         # Connect tab change signal to update placeholders when Performance Reports tab is selected
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -911,6 +921,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         # If Performance Reports tab is selected (index 0), update placeholders
         if index == 0:
             self._update_epoch_input_placeholders()
+        # If Process Mindmap tab is selected (index 3), auto-refresh if data not loaded
+        elif index == 3:
+            if self.mindmap_data is None:
+                self._load_and_draw_mindmap()
 
     def _update_epoch_input_placeholders(self):
         """Update input placeholders to show available epoch range."""
@@ -1641,9 +1655,237 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             print(f"PDF export error: {e}")
 
 
+    def _setup_process_mindmap_tab(self):
+        """Setup the Process Mindmap tab for visualizing process relationships."""
+        # Main layout for the tab
+        tab_layout = QtWidgets.QVBoxLayout(self.tab_mindmap)
+        tab_layout.setSpacing(10)
+        tab_layout.setContentsMargins(10, 10, 10, 10)
+
+        # --- Control Panel ---
+        control_frame = QtWidgets.QFrame()
+        control_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        control_frame.setStyleSheet("QFrame { background-color: #f0f0f0; border: 1px solid #cccccc; border-radius: 5px; }")
+        control_layout = QtWidgets.QHBoxLayout(control_frame)
+        control_layout.setSpacing(10)
+        control_layout.setContentsMargins(15, 10, 15, 10)
+
+        # Title label
+        title_label = QtWidgets.QLabel("<b>Process Hierarchy (Tree View)</b>")
+        title_label.setStyleSheet("font-size: 12px; color: #333333;")
+        control_layout.addWidget(title_label)
+
+        control_layout.addStretch(1)
+
+        # Refresh Button
+        self.refresh_mindmap_btn = QtWidgets.QPushButton("Refresh")
+        self.refresh_mindmap_btn.setStyleSheet("QPushButton { padding: 5px 15px; background-color: #4CAF50; color: white; border-radius: 3px; }")
+        self.refresh_mindmap_btn.clicked.connect(self._load_and_draw_mindmap)
+        control_layout.addWidget(self.refresh_mindmap_btn)
+
+        # Print to PDF Button
+        self.print_mindmap_pdf_btn = QtWidgets.QPushButton("Print to PDF")
+        self.print_mindmap_pdf_btn.setStyleSheet("QPushButton { padding: 5px 15px; background-color: #FF9800; color: white; border-radius: 3px; }")
+        self.print_mindmap_pdf_btn.clicked.connect(self._print_mindmap_to_pdf)
+        control_layout.addWidget(self.print_mindmap_pdf_btn)
+
+        tab_layout.addWidget(control_frame)
+
+        # --- Status Label ---
+        self.mindmap_status_label = QtWidgets.QLabel("Click Refresh to load process data")
+        self.mindmap_status_label.setStyleSheet("font-size: 11px; color: #666666; padding: 5px;")
+        tab_layout.addWidget(self.mindmap_status_label)
+
+        # --- Scroll Area for Mindmap ---
+        self.scroll_mindmap = QtWidgets.QScrollArea()
+        self.scroll_mindmap.setWidgetResizable(True)
+        self.scroll_mindmap.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_mindmap.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        tab_layout.addWidget(self.scroll_mindmap, stretch=1)
+
+        # Content widget for scroll area - fills entire space
+        content = QtWidgets.QWidget()
+        self.scroll_layout_mindmap = QtWidgets.QVBoxLayout(content)
+        self.scroll_layout_mindmap.setSpacing(0)
+        self.scroll_layout_mindmap.setContentsMargins(5, 5, 5, 5)
+        self.scroll_mindmap.setWidget(content)
+
+        # Store mindmap widget reference
+        self.mindmap_widget = None
+        self.mindmap_data = None
+
+    def _load_and_draw_mindmap(self):
+        """Load processes from JSON and draw the tree view."""
+        json_path = Path("eval_results/processes.json")
+        
+        if not json_path.exists():
+            self.mindmap_status_label.setText("File not found: " + str(json_path))
+            return
+        
+        if json_path.stat().st_size == 0:
+            self.mindmap_status_label.setText("Process file is empty")
+            return
+        
+        try:
+            with open(json_path, 'r') as f:
+                self.mindmap_data = json.load(f)
+        except json.JSONDecodeError as e:
+            self.mindmap_status_label.setText("Invalid JSON: " + str(e))
+            return
+        except Exception as e:
+            self.mindmap_status_label.setText("Error loading file: " + str(e))
+            return
+        
+        # Clear previous mindmap
+        if self.mindmap_widget:
+            self.mindmap_widget.setParent(None)
+            self.mindmap_widget.deleteLater()
+            self.mindmap_widget = None
+        
+        # Create tree visualization
+        processes = self.mindmap_data.get("processes", {})
+        self.mindmap_widget = self._create_tree_visualization(processes)
+        self.scroll_layout_mindmap.addWidget(self.mindmap_widget, stretch=1)
+        
+        process_count = len(processes)
+        self.mindmap_status_label.setText(f"Loaded {process_count} processes")
+    
+    def _create_tree_visualization(self, processes):
+        """Create a tree widget visualization of processes."""
+        viz_widget = QtWidgets.QWidget()
+        viz_layout = QtWidgets.QVBoxLayout(viz_widget)
+        viz_layout.setSpacing(5)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
+        
+        if not processes:
+            no_data_label = QtWidgets.QLabel("No process data available")
+            no_data_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            viz_layout.addWidget(no_data_label)
+        else:
+            # Create a tree widget for visualization
+            tree_widget = QtWidgets.QTreeWidget()
+            tree_widget.setHeaderLabel("Process Structure (Parent -> Children)")
+            # Make tree widget expand to fill available space
+            tree_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+            tree_widget.setMinimumHeight(600)  # Ensure minimum visible height
+            tree_widget.setMinimumWidth(800)   # Ensure minimum width for scrolling
+            # Enable horizontal scrollbar
+            tree_widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            # Make header section stretch to content
+            header = tree_widget.header()
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            header.setStretchLastSection(False)
+            tree_widget.setStyleSheet("""
+                QTreeWidget {
+                    font-size: 12px;
+                    border: 1px solid #cccccc;
+                    border-radius: 5px;
+                    padding: 5px;
+                }
+                QTreeWidget::item {
+                    padding: 6px;
+                    margin: 3px;
+                }
+            """)
+            
+            # Build tree from root processes
+            visited = set()
+            
+            def add_process_to_tree(parent_item, proc_uid, depth=0):
+                if proc_uid in visited:
+                    return
+                visited.add(proc_uid)
+                
+                proc_data = processes.get(proc_uid, {})
+                name = proc_data.get("name", "Unknown")
+                timeline = proc_data.get("timeline", {})
+                init_time = timeline.get("initialized", 0)
+                term_time = timeline.get("terminated", 0)
+                duration = term_time - init_time if term_time and init_time else 0
+                
+                item_text = name + " (" + proc_uid[:6] + "...)"
+                if duration > 0:
+                    item_text += " - " + str(round(duration, 3)) + "s"
+                
+                if parent_item is None:
+                    item = QtWidgets.QTreeWidgetItem(tree_widget)
+                else:
+                    item = QtWidgets.QTreeWidgetItem(parent_item)
+                
+                item.setText(0, item_text)
+                
+                # Add subtasks recursively
+                subtasks = proc_data.get("subtasks", []) or []
+                for subtask_uid in subtasks:
+                    if subtask_uid in processes:
+                        add_process_to_tree(item, subtask_uid, depth + 1)
+            
+            # Find root processes
+            for uid, proc in processes.items():
+                parent_uid = proc.get("parent_uid")
+                if parent_uid is None or parent_uid not in processes:
+                    add_process_to_tree(None, uid, 0)
+            
+            tree_widget.expandAll()
+            viz_layout.addWidget(tree_widget, stretch=1)
+            
+            # Add statistics in a frame at bottom
+            stats_frame = QtWidgets.QFrame()
+            stats_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            stats_frame.setStyleSheet("background-color: #f0f0f0; border-radius: 5px;")
+            stats_layout = QtWidgets.QHBoxLayout(stats_frame)
+            total_procs = len(processes)
+            root_procs = len([p for p in processes.values() if p.get("parent_uid") is None])
+            
+            stats_layout.addWidget(QtWidgets.QLabel("<b>Total:</b> " + str(total_procs)))
+            stats_layout.addWidget(QtWidgets.QLabel("<b>Root:</b> " + str(root_procs)))
+            stats_layout.addWidget(QtWidgets.QLabel("<b>Child:</b> " + str(total_procs - root_procs)))
+            stats_layout.addStretch(1)
+            
+            viz_layout.addWidget(stats_frame)
+        
+        return viz_widget
+
+    def _print_mindmap_to_pdf(self):
+        """Print the process hierarchy to PDF."""
+        from PyQt6.QtPrintSupport import QPrinter
+        from PyQt6.QtGui import QPainter, QPageLayout
+        from PyQt6.QtCore import QMarginsF
+        
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Process Hierarchy to PDF", "process_hierarchy.pdf", "PDF Files (*.pdf)"
+        )
+        if not file_path:
+            return
+        
+        try:
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(file_path)
+            
+            painter = QPainter(printer)
+            
+            # Render the tree widget
+            if self.mindmap_widget:
+                printer.setPageLayout(QPageLayout(
+                    QPageLayout.PageSize.A4,
+                    QPageLayout.Orientation.Portrait,
+                    QMarginsF(20, 20, 20, 20)
+                ))
+                
+                # Render the widget to PDF
+                self.mindmap_widget.render(painter)
+            else:
+                # No widget to render - draw a message
+                painter.drawText(painter.window(), QtCore.Qt.AlignmentFlag.AlignCenter, "No process data loaded")
+            
+            painter.end()
+            self.mindmap_status_label.setText(f"Saved to PDF: {file_path}")
+        except Exception as e:
+            self.mindmap_status_label.setText(f"PDF export failed: {str(e)}")
+
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     win = ResourceMonitorApp()
     win.show()
     sys.exit(app.exec())
-

@@ -14,12 +14,12 @@ parentProcess = Process("Transformer_from_scratch.py",
 #-----------------------
 
 class LayerNormalization(nn.Module):
-    def __init__(self, features: int, eps:float=10**-6) -> None:
+    def __init__(self, features: int, eps:float=10**-6, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
         # I would prefer to manually track parent child relations for now
-        self.__p0 = Process("LayerNormalization", exeTime)
+        self.__p0 = Process("LayerNormalization", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -34,13 +34,6 @@ class LayerNormalization(nn.Module):
         #--------------------
         
     def forward(self, x):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("LayerNormalization.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         # x: (batch, seq_len, hidden_size)
          # Keep the dimension for broadcasting
         mean = x.mean(dim = -1, keepdim = True) # (batch, seq_len, 1)
@@ -49,20 +42,14 @@ class LayerNormalization(nn.Module):
         # eps is to prevent dividing by zero or when std is very small
         
         output = self.alpha * (x - mean) / (std + self.eps) + self.bias
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
+    def __init__(self, d_model: int, d_ff: int, dropout: float, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("FeedForwardBlock", exeTime)
+        self.__p0 = Process(f"FeedForwardBlock_L{layer}", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -78,32 +65,17 @@ class FeedForwardBlock(nn.Module):
 
 
     def forward(self, x):
-
         # (batch, seq_len, d_model) --> (batch, seq_len, d_ff) --> (batch, seq_len, d_model)    
-
-        # Process creation
-        # -------------------
-        exeTime = time.time()
-        p1 = Process("FeedForwardBlock.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         output = self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class InputEmbeddings(nn.Module):
-    def __init__(self, d_model: int, vocab_size: int) -> None:
+    def __init__(self, d_model: int, vocab_size: int, layer: int = 0) -> None:
 
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("InputEmbeddings", exeTime)
+        self.__p0 = Process("InputEmbeddings", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -112,34 +84,24 @@ class InputEmbeddings(nn.Module):
         self.vocab_size = vocab_size
         self.embedding = nn.Embedding(vocab_size, d_model)
 
+        # Process modification
+        #--------------------
+        self.__p0._term = time.time()
+        #--------------------
+
     def forward(self, x):
         # (batch, seq_len) --> (batch, seq_len, d_model)
         # Multiply by sqrt(d_model) to scale the embeddings according to the paper
-
-        # Process creation
-        # -------------------
-        exeTime = time.time()
-        p1 = Process("InputEmbeddings.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         output = self.embedding(x) * math.sqrt(self.d_model)
-        
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #---------------------
-
         return output
 
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, d_model: int, seq_len: int, dropout: float) -> None:
+    def __init__(self, d_model: int, seq_len: int, dropout: float, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("PositionalEncoding", exeTime)
+        self.__p0 = Process("PositionalEncoding", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -168,30 +130,17 @@ class PositionalEncoding(nn.Module):
         #--------------------
 
     def forward(self, x):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("PositionalEncoding.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         output = x + (self.pe[:, :x.shape[1], :]).requires_grad_(False) # (batch, seq_len, d_model)
         output = self.dropout(output)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class ResidualConnection(nn.Module):
     
-        def __init__(self, features: int, dropout: float) -> None:
+        def __init__(self, features: int, dropout: float, layer: int = 0) -> None:
             # Process creation
             # -------------------
             exeTime = time.time()
-            self.__p0 = Process("ResidualConnection", exeTime)
+            self.__p0 = Process("ResidualConnection", exeTime, layer=layer)
             parentProcess.add_subtask(self.__p0)
             #--------------------
 
@@ -205,29 +154,16 @@ class ResidualConnection(nn.Module):
             #--------------------
     
         def forward(self, x, sublayer):
-            # Process creation
-            #--------------------
-            exeTime = time.time()
-            p1 = Process("ResidualConnection.forward", exeTime)
-            self.__p0.add_subtask(p1)
-            #--------------------
-
             output = x + self.dropout(sublayer(self.norm(x)))
-
-            # Process modification
-            #---------------------
-            p1._term = time.time()
-            Process.storeAll()
-            #--------------------
             return output
 
 
 class MultiHeadLatentAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, h: int, dropout: float):
+    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0):
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("MultiHeadLatentAttentionBlock", exeTime)
+        self.__p0 = Process(f"MultiHeadLatentAttentionBlock_L{layer}", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -271,13 +207,6 @@ class MultiHeadLatentAttentionBlock(nn.Module):
         return (attention_scores @ value), attention_scores
     
     def forward(self, q, k, v, mask=None):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("MultiHeadLatentAttentionBlock.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         batch_size, q_seq_len, _ = q.shape
         
         kv_latent = self.w_kv_compress(k)
@@ -302,22 +231,16 @@ class MultiHeadLatentAttentionBlock(nn.Module):
         # Multiply by Wo
         # (batch, seq_len, d_model) --> (batch, seq_len, d_model)  
         output = self.w_o(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 
 class MultiHeadAttentionBlock(nn.Module):
 
-    def __init__(self, d_model: int, h: int, dropout: float) -> None:
+    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("MultiHeadAttentionBlock", exeTime)
+        self.__p0 = Process(f"MultiHeadAttentionBlock_L{layer}", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -356,13 +279,6 @@ class MultiHeadAttentionBlock(nn.Module):
         return (attention_scores @ value), attention_scores
 
     def forward(self, q, k, v, mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("MultiHeadAttentionBlock.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         query = self.w_q(q) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
         key = self.w_k(k) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
         value = self.w_v(v) # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
@@ -382,28 +298,22 @@ class MultiHeadAttentionBlock(nn.Module):
         # Multiply by Wo
         # (batch, seq_len, d_model) --> (batch, seq_len, d_model)  
         output = self.w_o(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
         
 class EncoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("EncoderBlock", exeTime)
+        self.__p0 = Process(f"EncoderBlock_L{layer}", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout) for _ in range(2)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer) for _ in range(2)])
 
         # Process modification
         #--------------------
@@ -411,30 +321,17 @@ class EncoderBlock(nn.Module):
         #--------------------
 
     def forward(self, x, src_mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("EncoderBlock.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
         x = self.residual_connections[1](x, self.feed_forward_block)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return x
     
 class Encoder(nn.Module):
 
-    def __init__(self, features: int, layers: nn.ModuleList) -> None:
+    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Encoder", exeTime)
+        self.__p0 = Process("Encoder", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -448,31 +345,18 @@ class Encoder(nn.Module):
         #--------------------
 
     def forward(self, x, mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("Encoder.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         for layer in self.layers:
             x = layer(x, mask)
         output = self.norm(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class DecoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("DecoderBlock", exeTime)
+        self.__p0 = Process(f"DecoderBlock_L{layer}", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -480,7 +364,7 @@ class DecoderBlock(nn.Module):
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout) for _ in range(3)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer) for _ in range(3)])
 
         # Process modification
         #--------------------
@@ -488,31 +372,18 @@ class DecoderBlock(nn.Module):
         #--------------------
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("DecoderBlock.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask))
         x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask))
         x = self.residual_connections[2](x, self.feed_forward_block)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return x
     
 class Decoder(nn.Module):
 
-    def __init__(self, features: int, layers: nn.ModuleList) -> None:
+    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Decoder", exeTime)
+        self.__p0 = Process("Decoder", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -526,31 +397,18 @@ class Decoder(nn.Module):
         #--------------------
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("Decoder.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         for layer in self.layers:
             x = layer(x, encoder_output, src_mask, tgt_mask)
         output = self.norm(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class ProjectionLayer(nn.Module):
 
-    def __init__(self, d_model, vocab_size) -> None:
+    def __init__(self, d_model, vocab_size, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("ProjectionLayer", exeTime)
+        self.__p0 = Process("ProjectionLayer", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -563,30 +421,17 @@ class ProjectionLayer(nn.Module):
         #--------------------
 
     def forward(self, x) -> None:
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("ProjectionLayer.forward", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         # (batch, seq_len, d_model) --> (batch, seq_len, vocab_size)
         output = self.proj(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 class Transformer(nn.Module):
 
-    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer) -> None:
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer, layer: int = 0) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Transformer", exeTime)
+        self.__p0 = Process("Transformer", exeTime, layer=layer)
         parentProcess.add_subtask(self.__p0)
         #--------------------
 
@@ -605,61 +450,22 @@ class Transformer(nn.Module):
         #--------------------
 
     def encode(self, src, src_mask):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("Transformer.encode", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         # (batch, seq_len, d_model)
         src = self.src_embed(src)
         src = self.src_pos(src)
         output = self.encoder(src, src_mask)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
     
     def decode(self, encoder_output: torch.Tensor, src_mask: torch.Tensor, tgt: torch.Tensor, tgt_mask: torch.Tensor):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("Transformer.decode", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         # (batch, seq_len, d_model)
         tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
         output = self.decoder(tgt, encoder_output, src_mask, tgt_mask)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
     
     def project(self, x):
-        # Process creation
-        #--------------------
-        exeTime = time.time()
-        p1 = Process("Transformer.project", exeTime)
-        self.__p0.add_subtask(p1)
-        #--------------------
-
         # (batch, seq_len, vocab_size)
         output = self.projection_layer(x)
-
-        # Process modification
-        #---------------------
-        p1._term = time.time()
-        Process.storeAll()
-        #--------------------
         return output
 
 def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int=512, N: int=6, h: int=8, dropout: float=0.1, d_ff: int=2048) -> Transformer:
@@ -680,19 +486,19 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     
     # Create the encoder blocks
     encoder_blocks = []
-    for _ in range(N):
-        encoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout)
-        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
-        encoder_block = EncoderBlock(d_model, encoder_self_attention_block, feed_forward_block, dropout)
+    for layer_idx in range(N):
+        encoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout, layer=layer_idx)
+        encoder_block = EncoderBlock(d_model, encoder_self_attention_block, feed_forward_block, dropout, layer=layer_idx)
         encoder_blocks.append(encoder_block)
 
     # Create the decoder blocks
     decoder_blocks = []
-    for _ in range(N):
-        decoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout)
-        decoder_cross_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout)
-        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
-        decoder_block = DecoderBlock(d_model, decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+    for layer_idx in range(N):
+        decoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        decoder_cross_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout, layer=layer_idx)
+        decoder_block = DecoderBlock(d_model, decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout, layer=layer_idx)
         decoder_blocks.append(decoder_block)
     
     # Create the encoder and decoder

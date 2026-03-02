@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import BilingualDataset, causal_mask
-from Transformer_from_scratch import build_transformer
+from Transformer_from_scratch import build_transformer, parentProcess
 from config import get_weights_file_path, get_config
 
 from datasets import load_dataset
@@ -19,6 +19,160 @@ import os
 from pathlib import Path
 import warnings
 import torchmetrics
+import json
+import psutil
+import time
+
+import psutil
+import torch
+import csv
+import time
+from pathlib import Path
+import threading
+import pandas as pd
+from processes import Process
+
+
+class ResourceLogger:
+    def __init__(self, interval=1.0):
+        cnfg = get_config()
+        self.log_dir = Path(cnfg["resource_logging"])
+        self.interval = interval
+        self.running = False
+        self.thread = None
+        self.current_epoch = -1
+        self.lock = threading.Lock()
+        self.start_time = time.time()
+
+        self.file_sec = self.log_dir / "usage_seconds.csv"
+        self.file_epoch = self.log_dir / "usage_epochs.csv"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.file_sec.exists():
+            with open(self.file_sec, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+                
+        if not self.file_epoch.exists():
+            with open(self.file_epoch, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+
+    def _get_gpu_stats(self):
+        if torch.cuda.is_available():
+            try:
+                gpu_mem = torch.cuda.memory_allocated() / 1024**3
+                gpu_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                return gpu_mem, gpu_total
+            except Exception:
+                return 0.0, 0.0
+        return 0.0, 0.0
+
+
+    def mark_epoch(self, epoch):
+        with self.lock:
+            self.current_epoch = int(epoch)
+        cpu = psutil.cpu_percent(interval=0.1)
+        ram = psutil.virtual_memory().used / 1024**3
+        gpu, gpu_total = self._get_gpu_stats()
+
+        # --- Append row to per-epoch log file ---
+        try:
+            with open(self.file_epoch, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch, time.time(), cpu, ram, gpu, gpu_total])
+        except Exception:
+            pass
+
+    def _run(self):
+        while self.running:
+            # --- Append new data point ---
+            cpu = psutil.cpu_percent()
+            ram = psutil.virtual_memory().used / 1024**3
+            gpu, gpu_total = self._get_gpu_stats()
+            current_time = time.time() 
+            
+            with self.lock:
+                marker = f"epoch_{self.current_epoch}" if self.current_epoch >= 0 else ""
+
+            try:
+                with open(self.file_sec, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([current_time, cpu, ram, gpu, gpu_total, marker])
+            except Exception:
+                pass
+            
+            time.sleep(self.interval)
+
+    def start(self):
+        # --- Clear and initialize files ---
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        try: 
+            with open(self.file_sec, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["time", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb", "epoch_marker"])
+        except Exception:
+            pass
+
+        try:
+            with open(self.file_epoch, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "time_abs", "cpu_percent", "ram_gb", "gpu_gb", "gpu_total_gb"])
+        except Exception:
+            pass
+
+
+        # --- reset counter ---
+        with self.lock:
+            self.current_epoch = -1
+
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+            self.thread = None
+
+
+EVAL_RESULTS_DIR = "eval_results"
+
+def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
+    results_file = Path(config.get("eval_results_file", "eval_results/eval_metrics.json"))
+    Path(EVAL_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
+    results_file.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "epoch": epoch,
+        "bleu": float(bleu),
+        "cer": float(cer),
+        "wer": float(wer),
+        "samples": samples
+    }
+   
+    # At the beginning of a run (epoch 0) clear the file and write only this entry.
+    if int(epoch) == 0:
+        all_results = [entry]
+    else:
+        if results_file.exists():
+            try:
+                with open(results_file, "r") as f:
+                    all_results = json.load(f)
+            except Exception:
+                all_results = []
+        else:
+            all_results = []
+
+    # replace any existing entry for this epoch, then append and sort
+    all_results = [r for r in all_results if int(r.get("epoch", -1)) != int(epoch)]
+    all_results.append(entry)
+    all_results.sort(key=lambda x: int(x["epoch"]))
+
+    with open(results_file, "w") as f:
+        json.dump(all_results, f, indent=2)
+
 
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
@@ -115,6 +269,24 @@ def run_validation(model,
         metric = torchmetrics.BLEUScore()
         bleu = metric(predicted, expected)
         writer.add_scalar('validation BLEU', bleu, global_step)
+        # --- Tokenize input for BLEU ---
+        def tokenize_bleu(s):
+            s = s.replace('[SOS]', '').replace('[EOS]', '').replace('[PAD]', '')
+            s = s.strip()
+            return s.split() if s != "" else []
+
+        predicted_tokens = [tokenize_bleu(p) for p in predicted]
+        expected_tokens = [[tokenize_bleu(t)] for t in expected]
+
+        # torchmetrics.BLEUScore expects strings by default (it will tokenize them),
+        # so join token lists back into space-separated strings.
+        predicted_strs = [" ".join(toks) for toks in predicted_tokens]
+        expected_strs = [[" ".join(toks) for toks in refs] for refs in expected_tokens]
+
+        # --- Compute the BLEU metric ---
+        metric = torchmetrics.BLEUScore(n_gram=4)
+        bleu = metric(predicted_strs, expected_strs)
+        writer.add_scalar('validation BLEU', float(bleu), global_step)
         writer.flush()
     
     else: print(f'IM GONNA LICK YOUR PENAR')
@@ -207,6 +379,13 @@ def train_model(config):
 
 
     for epoch in range(initial_epoch, config['num_epochs']):
+        # Process creation for epoch
+        #--------------------
+        epochTime = time.time()
+        epochProcess = Process(f"train_epoch_{epoch:02d}", epochTime)
+        parentProcess.add_subtask(epochProcess)
+        #--------------------
+        
         torch.cuda.empty_cache()
         batch_iterator = tqdm(train_dataloader, desc=f'processing epoch {epoch:02d}')
         run_validation(model, val_dataloader,
@@ -243,6 +422,12 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
+
+        # Process modification for epoch
+        #---------------------
+        epochProcess._term = time.time()
+        Process.storeAll()
+        #--------------------
 
         #save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f'{epoch:02d}')
