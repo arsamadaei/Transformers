@@ -65,6 +65,22 @@ class TimeStamp:
             for i in _dis:
                 self.ts["disruptions"].append({i: _dis[i]})
 
+    @property
+    def _init(self):
+        return self.ts["initialized"]
+    
+    @_init.setter
+    def _init(self, value):
+        self.ts["initialized"] = value
+    
+    @property
+    def _term(self):
+        return self.ts["terminated"]
+    
+    @_term.setter
+    def _term(self, value):
+        self.ts["terminated"] = value
+
     
     def add_disruption(self, _type: str, timeStamp: "TimeStamp"):
         self.ts["disruptions"].append({_type: timeStamp})
@@ -103,11 +119,11 @@ class TimeStamp:
 
         return _dis
 
-def create_id(layer: int, len: int=8) -> str:
+def create_id(epoch: int, layer: int, len: int=8) -> str:
     hex_chars = '0123456789abcdef'
     randID = ''.join(random.choices(hex_chars, k=len))
 
-    return f"{layer}-{randID}"
+    return f"{epoch}x{layer}-{randID}"
 
 
 class Process(TimeStamp):
@@ -117,19 +133,22 @@ class Process(TimeStamp):
                  _init: float,
                  _term: float = -1,
                  layer: int = 0,
+                 epoch: int = 0,
                  _dis=None,
                  parent_uid: str|None = None,
-                 subtasks: list = []):
+                 subtasks: list|None = None):
         # layer = 0 means the process does not inhibit parallel processing
         # _term = -1 means the process is ongoing
+        # epoch tracks which training epoch this process belongs to
         super().__init__(_init, _term, _dis)
         self.name = name
         self.layer = layer
+        self.epoch = epoch
 
-        # Generate process ID
-        self.uid = create_id(self.layer)
+        # Generate process ID with epoch and layer
+        self.uid = create_id(self.epoch, self.layer)
         self.parent_uid = parent_uid
-        self.subtasks = subtasks
+        self.subtasks = subtasks if subtasks is not None else []
 
         Process.__instances.add(self)
 
@@ -145,6 +164,8 @@ class Process(TimeStamp):
         return { "name"    : self.name,
                  "uid"     : self.uid,
                  "parent_uid": self.parent_uid,
+                 "epoch"   : self.epoch,
+                 "layer"   : self.layer,
                  "timeline": super().to_hirearchial_dict(),
                  "subtasks": self.subtasks
                 }
@@ -201,8 +222,25 @@ class Process(TimeStamp):
 
 
     @staticmethod
+    def get_epoch_from_uid(uid):
+        """Extract epoch from UID format: epochxlayer-id (e.g., '5x2-abc123')."""
+        if "x" in uid and "-" in uid:
+            try:
+                return int(uid.split("x")[0])
+            except ValueError:
+                pass
+        return 0
+    
+    @staticmethod
     def get_layer_from_uid(uid):
-        return int(uid.split("-")[0])
+        """Extract layer from UID format: epochxlayer-id (e.g., '5x2-abc123')."""
+        if "x" in uid and "-" in uid:
+            try:
+                layer_part = uid.split("x")[1]
+                return int(layer_part.split("-")[0])
+            except (ValueError, IndexError):
+                pass
+        return 0
 
     @classmethod
     def load_dict(cls, data: dict) -> "Process":
@@ -218,11 +256,14 @@ class Process(TimeStamp):
         _dis = TimeStamp.de_serialize(dis)
         puid = data.get("parent_uid")
         sub_tasks = data.get("subtasks")
+        epoch = data.get("epoch", cls.get_epoch_from_uid(uid))
+        layer = data.get("layer", cls.get_layer_from_uid(uid))
         
         process = cls( name, 
                        _init,
                        _term,
-                       cls.get_layer_from_uid(uid),
+                       layer,
+                       epoch,
                        _dis,
                        puid,
                        sub_tasks

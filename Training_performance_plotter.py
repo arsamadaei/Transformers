@@ -1751,7 +1751,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.mindmap_status_label.setText(f"Loaded {process_count} processes")
     
     def _create_tree_visualization(self, processes):
-        """Create a tree widget visualization of processes."""
+        """Create a tree widget visualization showing hierarchy AND parallelism."""
         viz_widget = QtWidgets.QWidget()
         viz_layout = QtWidgets.QVBoxLayout(viz_widget)
         viz_layout.setSpacing(5)
@@ -1762,19 +1762,32 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             no_data_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             viz_layout.addWidget(no_data_label)
         else:
-            # Create a tree widget for visualization
+            # Create a tree widget for visualization with columns
             tree_widget = QtWidgets.QTreeWidget()
-            tree_widget.setHeaderLabel("Process Structure (Parent -> Children)")
-            # Make tree widget expand to fill available space
+            tree_widget.setHeaderLabels(["Process", "Epoch", "Layer", "Duration", "Execution"])
+            tree_widget.setColumnWidth(0, 400)  # Process name column
+            tree_widget.setColumnWidth(1, 50)   # Epoch column
+            tree_widget.setColumnWidth(2, 50)   # Layer column
+            tree_widget.setColumnWidth(3, 100)  # Duration column
+            tree_widget.setColumnWidth(4, 120)  # Execution type column
+            
             tree_widget.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-            tree_widget.setMinimumHeight(600)  # Ensure minimum visible height
-            tree_widget.setMinimumWidth(800)   # Ensure minimum width for scrolling
-            # Enable horizontal scrollbar
+            tree_widget.setMinimumHeight(600)
+            tree_widget.setMinimumWidth(900)
             tree_widget.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            # Make header section stretch to content
+            
             header = tree_widget.header()
-            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
             header.setStretchLastSection(False)
+            
+            # Colors for parallel groups
+            parallel_bg_colors = [
+                QtGui.QColor(200, 255, 200),  # Light green
+                QtGui.QColor(255, 230, 200),  # Light orange
+                QtGui.QColor(200, 220, 255),  # Light blue
+                QtGui.QColor(255, 200, 220),  # Light pink
+            ]
+            
             tree_widget.setStyleSheet("""
                 QTreeWidget {
                     font-size: 12px;
@@ -1784,43 +1797,131 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
                 }
                 QTreeWidget::item {
                     padding: 6px;
-                    margin: 3px;
+                    margin: 2px;
+                    border-radius: 3px;
+                }
+                QTreeWidget::item:selected {
+                    background-color: #b3d9ff;
                 }
             """)
             
-            # Build tree from root processes
             visited = set()
+            parallel_group_counter = {}  # Track color assignment per parent
             
-            def add_process_to_tree(parent_item, proc_uid, depth=0):
+            def get_epoch_from_uid(uid):
+                """Extract epoch from UID format: epochxlayer-id (e.g., '5x2-abc123')."""
+                if "x" in uid and "-" in uid:
+                    try:
+                        return int(uid.split("x")[0])
+                    except ValueError:
+                        pass
+                return 0
+            
+            def get_layer_from_uid(uid):
+                """Extract layer from UID format: epochxlayer-id (e.g., '5x2-abc123')."""
+                if "x" in uid and "-" in uid:
+                    try:
+                        layer_part = uid.split("x")[1]
+                        return int(layer_part.split("-")[0])
+                    except (ValueError, IndexError):
+                        pass
+                return 0
+            
+            def add_process_to_tree(parent_item, proc_uid, depth=0, is_parallel=False, parallel_color=None, parent_id=None):
+                """Add a process to the tree with proper parallelism handling."""
                 if proc_uid in visited:
-                    return
+                    return None
                 visited.add(proc_uid)
                 
                 proc_data = processes.get(proc_uid, {})
                 name = proc_data.get("name", "Unknown")
+                # Extract epoch and layer from UID
+                epoch = get_epoch_from_uid(proc_uid)
+                layer = get_layer_from_uid(proc_uid)
                 timeline = proc_data.get("timeline", {})
                 init_time = timeline.get("initialized", 0)
                 term_time = timeline.get("terminated", 0)
                 duration = term_time - init_time if term_time and init_time else 0
-                
-                item_text = name + " (" + proc_uid[:6] + "...)"
-                if duration > 0:
-                    item_text += " - " + str(round(duration, 3)) + "s"
                 
                 if parent_item is None:
                     item = QtWidgets.QTreeWidgetItem(tree_widget)
                 else:
                     item = QtWidgets.QTreeWidgetItem(parent_item)
                 
-                item.setText(0, item_text)
+                # Format name with parallel indicator if applicable
+                if is_parallel:
+                    item.setText(0, f"⚡ {name}  ({proc_uid[:8]}...)")
+                else:
+                    item.setText(0, f"{name}  ({proc_uid[:8]}...)")
                 
-                # Add subtasks recursively
+                # Column 1: Epoch
+                item.setText(1, str(epoch))
+                item.setTextAlignment(1, QtCore.Qt.AlignmentFlag.AlignCenter)
+                
+                # Column 2: Layer    
+                item.setText(2, str(layer))
+                item.setTextAlignment(2, QtCore.Qt.AlignmentFlag.AlignCenter)
+                
+                # Column 3: Duration
+                if duration > 0:
+                    item.setText(3, f"{duration:.3f}s")
+                else:
+                    item.setText(3, "ongoing")
+                item.setTextAlignment(3, QtCore.Qt.AlignmentFlag.AlignCenter)
+                
+                # Column 4: Execution Type
+                if is_parallel:
+                    item.setText(4, "⚡ Parallel")
+                    # Apply parallel group color to all columns
+                    if parallel_color:
+                        for col in range(5):
+                            item.setBackground(col, parallel_color)
+                else:
+                    item.setText(4, "Sequential")
+                
+                # Get subtasks and categorize them
                 subtasks = proc_data.get("subtasks", []) or []
+                subtask_layers = {}
+                
                 for subtask_uid in subtasks:
-                    if subtask_uid in processes:
-                        add_process_to_tree(item, subtask_uid, depth + 1)
+                    if subtask_uid in processes and subtask_uid not in visited:
+                        # Get layer from UID for consistency
+                        st_layer = get_layer_from_uid(subtask_uid)
+                        if st_layer not in subtask_layers:
+                            subtask_layers[st_layer] = []
+                        subtask_layers[st_layer].append(subtask_uid)
+                
+                # Separate parallel groups from sequential tasks
+                parallel_groups = {layer: tasks for layer, tasks in subtask_layers.items() if len(tasks) > 1}
+                sequential_tasks = [uid for layer, tasks in subtask_layers.items() 
+                                   for uid in tasks if len(tasks) == 1]
+                
+                # Generate unique key for this parent to track parallel group colors
+                parent_key = parent_id if parent_id else "root"
+                if parent_key not in parallel_group_counter:
+                    parallel_group_counter[parent_key] = 0
+                
+                # Add sequential tasks first (as direct children)
+                for subtask_uid in sequential_tasks:
+                    add_process_to_tree(item, subtask_uid, depth + 1, is_parallel=False, parent_id=proc_uid)
+                
+                # Add parallel tasks as DIRECT CHILDREN (not in a container)
+                # Each parallel task is independently expandable/collapsible
+                for layer, task_uids in sorted(parallel_groups.items()):
+                    # Assign color for this parallel group
+                    color_idx = parallel_group_counter[parent_key] % len(parallel_bg_colors)
+                    group_color = parallel_bg_colors[color_idx]
+                    parallel_group_counter[parent_key] += 1
+                    
+                    # Add each parallel task as a direct child with parallel coloring
+                    for subtask_uid in task_uids:
+                        add_process_to_tree(item, subtask_uid, depth + 1, 
+                                          is_parallel=True, parallel_color=group_color, 
+                                          parent_id=proc_uid)
+                
+                return item
             
-            # Find root processes
+            # Build tree from root processes
             for uid, proc in processes.items():
                 parent_uid = proc.get("parent_uid")
                 if parent_uid is None or parent_uid not in processes:
@@ -1829,20 +1930,53 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             tree_widget.expandAll()
             viz_layout.addWidget(tree_widget, stretch=1)
             
-            # Add statistics in a frame at bottom
-            stats_frame = QtWidgets.QFrame()
-            stats_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-            stats_frame.setStyleSheet("background-color: #f0f0f0; border-radius: 5px;")
-            stats_layout = QtWidgets.QHBoxLayout(stats_frame)
+            # Legend and info
+            info_frame = QtWidgets.QFrame()
+            info_frame.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            info_frame.setStyleSheet("background-color: #f8f8f8; border-radius: 5px; padding: 5px;")
+            info_layout = QtWidgets.QVBoxLayout(info_frame)
+            info_layout.setSpacing(5)
+            
+            # Legend
+            legend_layout = QtWidgets.QHBoxLayout()
+            legend_layout.addWidget(QtWidgets.QLabel("<b>Structure:</b>"))
+            
+            seq_label = QtWidgets.QLabel("Normal (Sequential)")
+            seq_label.setStyleSheet("padding: 2px 8px; background-color: white; border: 1px solid #ccc; border-radius: 3px;")
+            legend_layout.addWidget(seq_label)
+            
+            par_label = QtWidgets.QLabel("⚡ Parallel (colored = same layer = concurrent)")
+            par_label.setStyleSheet("padding: 2px 8px; background-color: #c8ffc8; border: 2px solid #4CAF50; border-radius: 3px; font-weight: bold;")
+            legend_layout.addWidget(par_label)
+            
+            legend_layout.addStretch(1)
+            info_layout.addLayout(legend_layout)
+            
+            # Statistics
+            stats_layout = QtWidgets.QHBoxLayout()
             total_procs = len(processes)
             root_procs = len([p for p in processes.values() if p.get("parent_uid") is None])
             
-            stats_layout.addWidget(QtWidgets.QLabel("<b>Total:</b> " + str(total_procs)))
-            stats_layout.addWidget(QtWidgets.QLabel("<b>Root:</b> " + str(root_procs)))
-            stats_layout.addWidget(QtWidgets.QLabel("<b>Child:</b> " + str(total_procs - root_procs)))
+            # Count parallel processes
+            parallel_proc_count = 0
+            for proc in processes.values():
+                subtasks = proc.get("subtasks", []) or []
+                subtask_layers = {}
+                for st_uid in subtasks:
+                    if st_uid in processes:
+                        st_layer = processes[st_uid].get("layer", 0)
+                        subtask_layers[st_layer] = subtask_layers.get(st_layer, 0) + 1
+                parallel_proc_count += sum(count for count in subtask_layers.values() if count > 1)
+            
+            stats_layout.addWidget(QtWidgets.QLabel(f"<b>Total:</b> {total_procs}"))
+            stats_layout.addWidget(QtWidgets.QLabel(f"<b>Root:</b> {root_procs}"))
+            stats_layout.addWidget(QtWidgets.QLabel(f"<b>Sequential:</b> {total_procs - root_procs - parallel_proc_count}"))
+            if parallel_proc_count > 0:
+                stats_layout.addWidget(QtWidgets.QLabel(f"<b style='color: #2E7D32;'>⚡ Parallel:</b> {parallel_proc_count}"))
             stats_layout.addStretch(1)
             
-            viz_layout.addWidget(stats_frame)
+            info_layout.addLayout(stats_layout)
+            viz_layout.addWidget(info_frame)
         
         return viz_widget
 

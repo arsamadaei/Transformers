@@ -10,17 +10,20 @@ from processes import Process, TimeStamp
 #-----------------------
 importTime = time.time()
 parentProcess = Process("Transformer_from_scratch.py", 
-                        importTime)
+                        importTime, epoch=0)
 #-----------------------
 
 class LayerNormalization(nn.Module):
-    def __init__(self, features: int, eps:float=10**-6, layer: int = 0) -> None:
+    def __init__(self, features: int, eps:float=10**-6, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
         # I would prefer to manually track parent child relations for now
-        self.__p0 = Process("LayerNormalization", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("LayerNormalization", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -45,12 +48,15 @@ class LayerNormalization(nn.Module):
         return output
 
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float, layer: int = 0) -> None:
+    def __init__(self, d_model: int, d_ff: int, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process(f"FeedForwardBlock_L{layer}", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process(f"FeedForwardBlock_L{layer}", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -70,13 +76,16 @@ class FeedForwardBlock(nn.Module):
         return output
 
 class InputEmbeddings(nn.Module):
-    def __init__(self, d_model: int, vocab_size: int, layer: int = 0) -> None:
+    def __init__(self, d_model: int, vocab_size: int, layer: int = 0, parent_process=None) -> None:
 
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("InputEmbeddings", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("InputEmbeddings", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -97,12 +106,15 @@ class InputEmbeddings(nn.Module):
 
 class PositionalEncoding(nn.Module):
 
-    def __init__(self, d_model: int, seq_len: int, dropout: float, layer: int = 0) -> None:
+    def __init__(self, d_model: int, seq_len: int, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("PositionalEncoding", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("PositionalEncoding", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -136,17 +148,20 @@ class PositionalEncoding(nn.Module):
 
 class ResidualConnection(nn.Module):
     
-        def __init__(self, features: int, dropout: float, layer: int = 0) -> None:
+        def __init__(self, features: int, dropout: float, layer: int = 0, parent_process=None) -> None:
             # Process creation
             # -------------------
             exeTime = time.time()
-            self.__p0 = Process("ResidualConnection", exeTime, layer=layer)
-            parentProcess.add_subtask(self.__p0)
+            self.__p0 = Process("ResidualConnection", exeTime, layer=layer, epoch=0)
+            if parent_process:
+                parent_process.add_subtask(self.__p0)
+            else:
+                parentProcess.add_subtask(self.__p0)
             #--------------------
 
             super().__init__()
             self.dropout = nn.Dropout(dropout)
-            self.norm = LayerNormalization(features)
+            self.norm = LayerNormalization(features, parent_process=self.__p0)
 
             # Process modification
             #--------------------
@@ -159,12 +174,15 @@ class ResidualConnection(nn.Module):
 
 
 class MultiHeadLatentAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0):
+    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0, parent_process=None):
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process(f"MultiHeadLatentAttentionBlock_L{layer}", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process(f"MultiHeadLatentAttentionBlock_L{layer}", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -236,12 +254,15 @@ class MultiHeadLatentAttentionBlock(nn.Module):
 
 class MultiHeadAttentionBlock(nn.Module):
 
-    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0) -> None:
+    def __init__(self, d_model: int, h: int, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process(f"MultiHeadAttentionBlock_L{layer}", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process(f"MultiHeadAttentionBlock_L{layer}", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -302,18 +323,23 @@ class MultiHeadAttentionBlock(nn.Module):
         
 class EncoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process(f"EncoderBlock_L{layer}", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process(f"EncoderBlock_L{layer}", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer) for _ in range(2)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer, parent_process=self.__p0) for _ in range(2)])
+        self.__p0.add_subtask(self_attention_block._MultiHeadLatentAttentionBlock__p0)
+        self.__p0.add_subtask(feed_forward_block._FeedForwardBlock__p0)
 
         # Process modification
         #--------------------
@@ -327,17 +353,22 @@ class EncoderBlock(nn.Module):
     
 class Encoder(nn.Module):
 
-    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0) -> None:
+    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Encoder", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("Encoder", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization(features)
+        self.norm = LayerNormalization(features, parent_process=self.__p0)
+        for layer_block in layers:
+            self.__p0.add_subtask(layer_block._EncoderBlock__p0)
 
         # Process modification
         #--------------------
@@ -352,19 +383,25 @@ class Encoder(nn.Module):
 
 class DecoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process(f"DecoderBlock_L{layer}", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process(f"DecoderBlock_L{layer}", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
         self.self_attention_block = self_attention_block
         self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer) for _ in range(3)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer, parent_process=self.__p0) for _ in range(3)])
+        self.__p0.add_subtask(self_attention_block._MultiHeadLatentAttentionBlock__p0)
+        self.__p0.add_subtask(cross_attention_block._MultiHeadLatentAttentionBlock__p0)
+        self.__p0.add_subtask(feed_forward_block._FeedForwardBlock__p0)
 
         # Process modification
         #--------------------
@@ -379,17 +416,22 @@ class DecoderBlock(nn.Module):
     
 class Decoder(nn.Module):
 
-    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0) -> None:
+    def __init__(self, features: int, layers: nn.ModuleList, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Decoder", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("Decoder", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization(features)
+        self.norm = LayerNormalization(features, parent_process=self.__p0)
+        for layer_block in layers:
+            self.__p0.add_subtask(layer_block._DecoderBlock__p0)
 
         # Process modification
         #--------------------
@@ -404,12 +446,15 @@ class Decoder(nn.Module):
 
 class ProjectionLayer(nn.Module):
 
-    def __init__(self, d_model, vocab_size, layer: int = 0) -> None:
+    def __init__(self, d_model, vocab_size, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("ProjectionLayer", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("ProjectionLayer", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -427,12 +472,15 @@ class ProjectionLayer(nn.Module):
 
 class Transformer(nn.Module):
 
-    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer, layer: int = 0) -> None:
+    def __init__(self, encoder: Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
-        self.__p0 = Process("Transformer", exeTime, layer=layer)
-        parentProcess.add_subtask(self.__p0)
+        self.__p0 = Process("Transformer", exeTime, layer=layer, epoch=0)
+        if parent_process:
+            parent_process.add_subtask(self.__p0)
+        else:
+            parentProcess.add_subtask(self.__p0)
         #--------------------
 
         super().__init__()
@@ -443,6 +491,13 @@ class Transformer(nn.Module):
         self.src_pos = src_pos
         self.tgt_pos = tgt_pos
         self.projection_layer = projection_layer
+        self.__p0.add_subtask(encoder._Encoder__p0)
+        self.__p0.add_subtask(decoder._Decoder__p0)
+        self.__p0.add_subtask(src_embed._InputEmbeddings__p0)
+        self.__p0.add_subtask(tgt_embed._InputEmbeddings__p0)
+        self.__p0.add_subtask(src_pos._PositionalEncoding__p0)
+        self.__p0.add_subtask(tgt_pos._PositionalEncoding__p0)
+        self.__p0.add_subtask(projection_layer._ProjectionLayer__p0)
 
         # Process modification
         #--------------------
@@ -472,17 +527,17 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     # Process creation
     #--------------------
     exeTime = time.time()
-    p0 = Process("build_transformer", exeTime)
+    p0 = Process("build_transformer", exeTime, epoch=0)
     parentProcess.add_subtask(p0)
     #--------------------
 
     # Create the embedding layers
-    src_embed = InputEmbeddings(d_model, src_vocab_size)
-    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
+    src_embed = InputEmbeddings(d_model, src_vocab_size, parent_process=p0)
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size, parent_process=p0)
 
     # Create the positional encoding layers
-    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
-    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout)
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout, parent_process=p0)
+    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout, parent_process=p0)
     
     # Create the encoder blocks
     encoder_blocks = []
@@ -502,14 +557,14 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
         decoder_blocks.append(decoder_block)
     
     # Create the encoder and decoder
-    encoder = Encoder(d_model, nn.ModuleList(encoder_blocks))
-    decoder = Decoder(d_model, nn.ModuleList(decoder_blocks))
+    encoder = Encoder(d_model, nn.ModuleList(encoder_blocks), parent_process=p0)
+    decoder = Decoder(d_model, nn.ModuleList(decoder_blocks), parent_process=p0)
     
     # Create the projection layer
-    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size, parent_process=p0)
     
     # Create the transformer
-    transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer)
+    transformer = Transformer(encoder, decoder, src_embed, tgt_embed, src_pos, tgt_pos, projection_layer, parent_process=p0)
     
     # Initialize the parameters
     for p in transformer.parameters():

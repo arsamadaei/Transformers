@@ -243,6 +243,10 @@ def run_validation(model,
             target_text = batch['tgt_text'][0]
             model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
+            # Add to lists for metric calculation
+            predicted.append(model_out_text)
+            expected.append(target_text)
+
             print_msg('-'*console_width)
             print_msg(f'SOURCE: {source_text}')
             print_msg(f'TARGET: {target_text}')
@@ -377,12 +381,17 @@ def train_model(config):
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
+    # Initialize resource logger for live monitoring
+    resource_logger = ResourceLogger(interval=1.0)
+    resource_logger.start()
 
     for epoch in range(initial_epoch, config['num_epochs']):
+        # Mark epoch for resource logging
+        resource_logger.mark_epoch(epoch)
         # Process creation for epoch
         #--------------------
         epochTime = time.time()
-        epochProcess = Process(f"train_epoch_{epoch:02d}", epochTime)
+        epochProcess = Process(f"train_epoch_{epoch:02d}", epochTime, epoch=epoch)
         parentProcess.add_subtask(epochProcess)
         #--------------------
         
@@ -437,6 +446,9 @@ def train_model(config):
             'optimizer_state_dict': optimizer.state_dict(),
             'global_step': global_step
         }, model_filename)
+    
+    # Stop resource logging when training completes
+    resource_logger.stop()
 
 
 if __name__ == '__main__':
