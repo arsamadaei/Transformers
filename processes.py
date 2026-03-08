@@ -381,7 +381,7 @@ class Process(TimeStamp):
         os.makedirs(os.path.dirname(ofile), exist_ok=True)
         
         with open(ofile, 'w') as f:
-            json.dump({"processes": []}, f, indent=2)
+            json.dump({"processes": {}}, f, indent=2)
 
     @staticmethod
     def load_parent(ofile = None):

@@ -29,7 +29,7 @@ import altair as alt
 # Import Mindmap for process visualization
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from processes import Mindmap
+from processes import Mindmap, Process
 
 warnings.filterwarnings("ignore")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,11 +45,460 @@ TARGET_TEXT = "No data loaded."
 ATTN_LAYERS = [0, 1, 2, 3, 4, 5]
 
 
-def get_bleuscore(predicted: list, expected: list):
-    bleu = BLEUScore()
-    print(f"Target: {predicted}\nexpected: {expected}")
+class GanttChartWidget(QtWidgets.QWidget):
+    """
+    Gantt chart widget for visualizing process timelines.
+    Each process gets its own row. Time flows horizontally.
+    Fixed labels on left, scrollable chart on right.
+    """
+    # Signal emitted when mouse hovers (for crosshair sync)
+    sigHoverTime = QtCore.pyqtSignal(float)
     
-    return bleu(predicted, expected)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Main horizontal splitter: scrollable labels | scrollable chart
+        self.main_layout = QtWidgets.QHBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        
+        # Left side: Scrollable labels panel
+        self.labels_scroll = QtWidgets.QScrollArea()
+        self.labels_scroll.setWidgetResizable(True)
+        self.labels_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.labels_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.labels_scroll.setFixedWidth(250)
+        
+        self.labels_panel = QtWidgets.QWidget()
+        labels_layout = QtWidgets.QVBoxLayout(self.labels_panel)
+        labels_layout.setContentsMargins(5, 5, 5, 5)
+        labels_layout.setSpacing(0)
+        
+        # Header for labels
+        self.labels_header = QtWidgets.QLabel("Epoch | Process")
+        self.labels_header.setFixedHeight(40)
+        self.labels_header.setStyleSheet("font-weight: bold; font-size: 11px; border-bottom: 2px solid #333;")
+        labels_layout.addWidget(self.labels_header)
+        
+        # Container for process labels
+        self.labels_container = QtWidgets.QWidget()
+        self.labels_layout = QtWidgets.QVBoxLayout(self.labels_container)
+        self.labels_layout.setSpacing(2)
+        self.labels_layout.setContentsMargins(0, 0, 0, 0)
+        labels_layout.addWidget(self.labels_container)
+        labels_layout.addStretch(1)
+        
+        self.labels_scroll.setWidget(self.labels_panel)
+        self.main_layout.addWidget(self.labels_scroll)
+        
+        # Right side: Scrollable chart area
+        self.scroll_area = QtWidgets.QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Connect vertical scroll to sync with labels
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self._sync_labels_scroll)
+        
+        # Chart container
+        self.chart_container = QtWidgets.QWidget()
+        self.chart_layout = QtWidgets.QVBoxLayout(self.chart_container)
+        self.chart_layout.setSpacing(2)
+        self.chart_layout.setContentsMargins(5, 5, 5, 5)
+        self.scroll_area.setWidget(self.chart_container)
+        
+        self.main_layout.addWidget(self.scroll_area, stretch=1)
+        
+        # Store process data
+        self.processes = {}
+        self.process_labels = []  # List of label widgets
+        self.min_time = 0
+        self.max_time = 1
+        self.time_scale = 50  # pixels per second
+        self._epoch_range = (None, None)  # Filter range
+        
+        # Crosshair overlay
+        self.crosshair_overlay = None
+        
+    def _sync_labels_scroll(self, value):
+        """Sync label panel scroll with chart scroll."""
+        # Labels are fixed, no need to scroll them
+        pass
+        
+    def clear_gantt(self):
+        """Clear all process rows from the chart."""
+        # Clear labels
+        while self.labels_layout.count():
+            item = self.labels_layout.takeAt(0)
+            if item.widget() and item.widget() != self.labels_header:
+                item.widget().deleteLater()
+        self.process_labels = []
+        
+        # Clear chart
+        while self.chart_layout.count():
+            item = self.chart_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        self.processes = {}
+        self.crosshair_overlay = None
+        self.current_epoch = None
+        
+    def set_epoch_range(self, start_epoch, end_epoch):
+        """Set epoch range filter."""
+        self._epoch_range = (start_epoch, end_epoch)
+        
+    def load_processes(self, processes_dict):
+        """
+        Load processes and create Gantt chart with one row per process.
+        
+        Args:
+            processes_dict: Dictionary of {uid: process_data}
+        """
+        self.clear_gantt()
+        
+        if not processes_dict:
+            return
+            
+        self.processes = processes_dict
+        
+        # Build process list with timeline data
+        process_list = []
+        for uid, proc in processes_dict.items():
+            timeline = proc.get('timeline', {})
+            init_time = timeline.get('initialized', 0)
+            term_time = timeline.get('terminated', -1)
+            if term_time == -1 or term_time < init_time:
+                term_time = time.time()
+            
+            layer = proc.get('layer', 0)
+            name = proc.get('name', 'Unknown')
+            epoch = proc.get('epoch', 0)
+            
+            duration = term_time - init_time
+            # Filter out instant processes (construction) but keep short forward passes
+            # Forward passes can be very short (microseconds), so use a smaller threshold
+            if duration < 0.000001:  # 1 microsecond threshold
+                continue
+            
+            # Apply epoch filter if set
+            start_ep, end_ep = self._epoch_range
+            if start_ep is not None and epoch < start_ep:
+                continue
+            if end_ep is not None and epoch > end_ep:
+                continue
+                
+            process_list.append({
+                'uid': uid,
+                'name': name,
+                'init': init_time,
+                'term': term_time,
+                'layer': layer,
+                'epoch': epoch,
+                'duration': duration
+            })
+        
+        if not process_list:
+            return
+            
+        # Sort by epoch, then by start time
+        process_list.sort(key=lambda x: (x['epoch'], x['init']))
+        
+        # Find time range (relative to start)
+        self.min_time = min(p['init'] for p in process_list)
+        self.max_time = max(p['term'] for p in process_list)
+        total_duration = self.max_time - self.min_time
+        
+        # Normalize times
+        for p in process_list:
+            p['init'] -= self.min_time
+            p['term'] -= self.min_time
+        
+        # Calculate width needed
+        chart_width = max(800, int(total_duration * self.time_scale) + 100)
+        
+        # Colors for epochs
+        epoch_colors = [
+            (70, 130, 180),   # Steel blue
+            (60, 179, 113),   # Medium sea green
+            (255, 165, 0),    # Orange
+            (147, 112, 219),  # Medium purple
+            (255, 99, 71),    # Tomato
+            (32, 178, 170),   # Light sea green
+        ]
+        
+        # Create header row with time scale
+        header = self._create_time_header(chart_width, total_duration)
+        self.chart_layout.addWidget(header)
+        
+        # Add legend for colors
+        legend = self._create_epoch_legend(process_list, epoch_colors)
+        self.chart_layout.addWidget(legend)
+        
+        # Group processes by base task name, but split into multiple rows if they overlap
+        # Extract base name: "train_epoch_05" -> "train_epoch", "EncoderBlock_L0" -> "EncoderBlock"
+        def get_base_task_name(name):
+            """Extract base task name by removing epoch/layer numbers."""
+            import re
+            base = re.sub(r'_\d+$', '', name)  # Remove _NN at end
+            base = re.sub(r'_L\d+$', '', base)  # Remove _LNN at end
+            return base
+        
+        # Group by base name first
+        task_groups = {}  # {base_task_name: [process1, process2, ...]}
+        for p in process_list:
+            base_name = get_base_task_name(p['name'])
+            if base_name not in task_groups:
+                task_groups[base_name] = []
+            task_groups[base_name].append(p)
+        
+        # For each base task group, assign processes to rows based on time overlap
+        # If two processes overlap in time, they need separate rows
+        def assign_to_rows(processes):
+            """Assign processes to rows, creating new rows only when there's a time conflict."""
+            if not processes:
+                return []
+            
+            # Sort by start time
+            sorted_procs = sorted(processes, key=lambda p: p['init'])
+            
+            # rows: list of (row_index, [processes_in_row])
+            rows = []
+            
+            for p in sorted_procs:
+                # Find a row where this process doesn't overlap with any existing process
+                placed = False
+                for row_procs in rows:
+                    # Check if p overlaps with any process in this row
+                    overlaps = False
+                    for existing in row_procs:
+                        # Overlap if: p starts before existing ends AND p ends after existing starts
+                        if p['init'] < existing['term'] and p['term'] > existing['init']:
+                            overlaps = True
+                            break
+                    
+                    if not overlaps:
+                        # Place in this row
+                        row_procs.append(p)
+                        placed = True
+                        break
+                
+                if not placed:
+                    # Create new row
+                    rows.append([p])
+            
+            return rows
+        
+        # Build list of (base_name, row_index, [processes]) tuples
+        rows_to_create = []  # [(base_name, row_index, [processes]), ...]
+        for base_name in sorted(task_groups.keys()):
+            processes = task_groups[base_name]
+            rows = assign_to_rows(processes)
+            for row_idx, row_procs in enumerate(rows):
+                rows_to_create.append((base_name, row_idx, row_procs))
+        
+        # Sort rows: first by base_name, then by earliest start time in each row
+        def sort_key(item):
+            base_name, row_idx, procs = item
+            earliest_start = min(p['init'] for p in procs) if procs else 0
+            return (base_name, earliest_start)
+        
+        rows_to_create.sort(key=sort_key)
+        
+        # Create rows
+        for base_name, row_idx, row_procs in rows_to_create:
+            # Create label with row number if there are multiple rows for this task
+            if row_idx > 0:
+                label_text = f"{base_name[:24]} ({row_idx+1})"
+            else:
+                label_text = base_name[:28]
+            
+            label = QtWidgets.QLabel(label_text)
+            label.setFixedHeight(28)
+            label.setStyleSheet("font-size: 10px; padding: 2px 5px; border-bottom: 1px solid #eee; font-weight: bold;")
+            label.setToolTip(f"Task: {base_name}\n{len(row_procs)} non-overlapping instances")
+            self.labels_layout.addWidget(label)
+            self.process_labels.append(label)
+            
+            # Create chart row
+            row_widget = self._create_multi_epoch_row(row_procs, chart_width, epoch_colors)
+            self.chart_layout.addWidget(row_widget)
+        
+        # Add stretch at bottom
+        self.chart_layout.addStretch(1)
+        self.labels_layout.addStretch(1)
+        
+        # Set container width
+        self.chart_container.setMinimumWidth(chart_width + 50)
+        
+        # Create crosshair overlay
+        self._create_crosshair()
+        
+    def _create_time_header(self, chart_width, total_duration):
+        """Create time axis header."""
+        header = QtWidgets.QWidget()
+        header.setFixedHeight(40)
+        header.setStyleSheet("background-color: #f5f5f5; border-bottom: 2px solid #333;")
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 5, 10, 5)
+        header_layout.setSpacing(0)
+        
+        # Time markers
+        num_markers = min(20, max(5, int(total_duration / 10)))
+        interval = total_duration / num_markers if num_markers > 0 else 1
+        
+        for i in range(num_markers + 1):
+            time_val = interval * i
+            x_pos = int(time_val * self.time_scale)
+            
+            marker_widget = QtWidgets.QWidget()
+            marker_layout = QtWidgets.QVBoxLayout(marker_widget)
+            marker_layout.setContentsMargins(0, 0, 0, 0)
+            marker_layout.setSpacing(0)
+            
+            # Tick mark
+            tick = QtWidgets.QFrame()
+            tick.setFixedWidth(1)
+            tick.setFixedHeight(10)
+            tick.setStyleSheet("background-color: #666;")
+            marker_layout.addWidget(tick)
+            
+            # Label
+            label = QtWidgets.QLabel(f"{time_val:.0f}s")
+            label.setStyleSheet("font-size: 9px; color: #666;")
+            label.setFixedWidth(40)
+            marker_layout.addWidget(label)
+            
+            header_layout.addWidget(marker_widget)
+            header_layout.addSpacing(int(interval * self.time_scale) - 40)
+        
+        header_layout.addStretch(1)
+        return header
+        
+    def _create_epoch_legend(self, process_list, epoch_colors):
+        """Create a legend showing epoch colors."""
+        legend_widget = QtWidgets.QWidget()
+        legend_widget.setFixedHeight(30)
+        legend_layout = QtWidgets.QHBoxLayout(legend_widget)
+        legend_layout.setContentsMargins(10, 5, 10, 5)
+        legend_layout.setSpacing(10)
+        
+        legend_title = QtWidgets.QLabel("Epochs:")
+        legend_title.setStyleSheet("font-weight: bold; font-size: 10px;")
+        legend_layout.addWidget(legend_title)
+        
+        # Get unique epochs
+        epochs = sorted(set(p['epoch'] for p in process_list))
+        
+        for epoch in epochs[:8]:  # Show up to 8 epochs
+            color = epoch_colors[epoch % len(epoch_colors)]
+            color_str = f"rgb({color[0]}, {color[1]}, {color[2]})"
+            
+            # Color box
+            color_box = QtWidgets.QFrame()
+            color_box.setFixedSize(16, 16)
+            color_box.setStyleSheet(f"background-color: {color_str}; border: 1px solid #333;")
+            legend_layout.addWidget(color_box)
+            
+            # Epoch label
+            epoch_label = QtWidgets.QLabel(f"E{epoch}")
+            epoch_label.setStyleSheet("font-size: 9px;")
+            legend_layout.addWidget(epoch_label)
+        
+        if len(epochs) > 8:
+            more_label = QtWidgets.QLabel(f"... +{len(epochs) - 8} more")
+            more_label.setStyleSheet("font-size: 9px; color: #666;")
+            legend_layout.addWidget(more_label)
+        
+        legend_layout.addStretch(1)
+        return legend_widget
+        
+    def _create_multi_epoch_row(self, processes, chart_width, epoch_colors):
+        """Create a row with multiple epoch bars for the same task."""
+        row = QtWidgets.QWidget()
+        row.setFixedHeight(28)
+        row.setStyleSheet("background-color: white;")
+        
+        # Sort processes by start time
+        processes = sorted(processes, key=lambda p: p['init'])
+        
+        # Create a bar for each epoch
+        for p in processes:
+            x_start = int(p['init'] * self.time_scale) + 10
+            width = max(3, int(p['duration'] * self.time_scale))
+            
+            color = epoch_colors[p['epoch'] % len(epoch_colors)]
+            color_str = f"rgb({color[0]}, {color[1]}, {color[2]})"
+            
+            bar = QtWidgets.QFrame(row)
+            bar.setGeometry(x_start, 4, width, 20)
+            bar.setStyleSheet(f"background-color: {color_str}; border-radius: 3px; border: 1px solid rgba(0,0,0,0.3);")
+            
+            # Epoch label inside bar
+            if width > 25:
+                epoch_label = QtWidgets.QLabel(f"E{p['epoch']}", bar)
+                epoch_label.setGeometry(2, 2, width - 4, 16)
+                epoch_label.setStyleSheet("color: white; font-size: 8px; background: transparent;")
+                epoch_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            
+            # Tooltip
+            bar.setToolTip(f"{p['name']}\nEpoch: {p['epoch']}, Layer: {p['layer']}\n"
+                          f"Start: {p['init']:.2f}s\nDuration: {p['duration']:.2f}s")
+        
+        # Mouse tracking for crosshair
+        row.setMouseTracking(True)
+        row.mouseMoveEvent = lambda e, r=row: self._on_row_mouse_move(e, r)
+        row.leaveEvent = lambda e: self._on_row_mouse_leave()
+        
+        return row
+        
+    def _create_crosshair(self):
+        """Create crosshair overlay widget."""
+        self.crosshair_overlay = QtWidgets.QFrame(self.chart_container)
+        self.crosshair_overlay.setGeometry(0, 0, 1, self.chart_container.height())
+        self.crosshair_overlay.setStyleSheet("background-color: red;")
+        self.crosshair_overlay.hide()
+        
+    def _on_row_mouse_move(self, event, row):
+        """Handle mouse movement over a row."""
+        # Calculate time from mouse position within the row
+        x = event.pos().x()
+        time_x = (x - 10) / self.time_scale  # Account for margin
+        
+        # Position crosshair at exact cursor X position
+        if hasattr(self, 'crosshair_overlay') and self.crosshair_overlay:
+            self.crosshair_overlay.setGeometry(x, 0, 1, self.chart_container.height())
+            self.crosshair_overlay.show()
+            self.crosshair_overlay.raise_()
+        
+        # Emit signal for other charts (relative time, same as resource plots)
+        # Resource plots use relative time (starting from 0)
+        self.sigHoverTime.emit(time_x)
+        
+    def _on_row_mouse_leave(self):
+        """Handle mouse leaving a row."""
+        if hasattr(self, 'crosshair_overlay') and self.crosshair_overlay:
+            self.crosshair_overlay.hide()
+        
+def get_bleuscore(predicted: str, expected: str):
+    """
+    Calculate BLEU score between predicted and expected (reference) text.
+    
+    Args:
+        predicted: The predicted/generated text string
+        expected: The expected/reference text string
+    
+    Returns:
+        BLEU score as a float (0.0 to 1.0)
+    """
+    bleu = BLEUScore()
+    print(f"Predicted: {predicted}\nExpected: {expected}")
+    
+    # BLEUScore expects:
+    # - preds: List[str] - list of predictions
+    # - target: List[List[str]] - list of lists of references (multiple refs per prediction allowed)
+    result = bleu([predicted], [[expected]])
+    return float(result)
 
 
 def minmax_downsample(x, y, target_points=2000):
@@ -349,7 +798,9 @@ def load_model_and_generate_data(weights_path: str, gpu_sample_interval: float =
     enc = tokenizer.encode(predicted_text)
     inference_stats['TPS'] = len(enc.ids) / t_rel
 
-    inference_stats["bleu"] = get_bleuscore(TARGET_TEXT, predicted_text)
+    bleu_score = get_bleuscore(predicted_text, TARGET_TEXT)
+    print(f"BLEU score computed: {bleu_score} (type: {type(bleu_score)})")
+    inference_stats["bleu"] = bleu_score
 
     # --- Generate attention maps ---
     for layer in ATTN_LAYERS:
@@ -433,10 +884,16 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             with open("eval_results/eval_metrics.json", "r") as f:
                 data = json.load(f)
             df = pd.DataFrame([
-                {"epoch": entry["epoch"], "cer": entry["cer"], "wer": entry["wer"], "bleu": entry["bleu"]}
+                {
+                    "epoch": entry["epoch"], 
+                    "cer": entry["cer"], 
+                    "wer": entry["wer"], 
+                    "bleu": entry["bleu"],
+                    "loss": entry.get("loss", 0.0)  # Loss may not exist in older data
+                }
                 for entry in data
             ])
-            df.rename(columns={"cer": "CER", "wer": "WER", "bleu": "BLEU"}, inplace=True)
+            df.rename(columns={"cer": "CER", "wer": "WER", "bleu": "BLEU", "loss": "Loss"}, inplace=True)
             epochs = df["epoch"]
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
@@ -446,17 +903,21 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.line_cer = self.plot_linguistic.plot(pen=pg.mkPen('r', width=2), symbol='o', symbolBrush='r')
         self.line_wer = self.plot_linguistic.plot(pen=pg.mkPen('b', width=2), symbol='o', symbolBrush='b')
         self.line_bleu = self.plot_linguistic.plot(pen=pg.mkPen('g', width=2), symbol='o', symbolBrush='g')
+        self.line_loss = self.plot_linguistic.plot(pen=pg.mkPen('purple', width=2), symbol='o', symbolBrush='purple')
 
         legend = self.plot_linguistic.addLegend()
 
         legend.addItem(self.line_cer, "CER")
         legend.addItem(self.line_wer, "WER")
         legend.addItem(self.line_bleu, "BLEU")
+        legend.addItem(self.line_loss, "Loss")
 
         if not df.empty:
             self.line_cer.setData(epochs, df["CER"])
             self.line_wer.setData(epochs, df["WER"])
             self.line_bleu.setData(epochs, df["BLEU"])
+            if "Loss" in df.columns:
+                self.line_loss.setData(epochs, df["Loss"])
 
         self.weights_path = ""
         self.attn_content_widgets = []
@@ -480,6 +941,147 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.placeholder_timer = QtCore.QTimer()
         self.placeholder_timer.timeout.connect(self._update_epoch_input_placeholders)
         self.placeholder_timer.start(5000)  # Check every 5 seconds
+        
+    def _toggle_gantt_chart(self, checked):
+        """Toggle the visibility of the Gantt chart."""
+        self._gantt_visible = checked
+        if checked:
+            self.gantt_container.show()
+            # Setup crosshair lines for plots
+            self._setup_crosshair_lines()
+            # Load processes data
+            self._load_gantt_data()
+            # Adjust splitter to give Gantt chart reasonable space (bottom)
+            total_height = self.main_splitter.height()
+            plots_height = int(total_height * 0.6)
+            gantt_height = int(total_height * 0.4)
+            self.main_splitter.setSizes([plots_height, gantt_height])
+        else:
+            self.gantt_container.hide()
+            self.main_splitter.setSizes([self.main_splitter.height(), 0])
+            # Hide crosshair lines
+            for plot, line in self._crosshair_lines:
+                line.hide()
+            
+    def _get_process_min_time(self):
+        """Get the earliest process init time from processes.json for time synchronization."""
+        json_path = Path("eval_results/processes.json")
+        if not json_path.exists():
+            return None
+        
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            processes = data.get("processes", {})
+            if not processes:
+                return None
+            
+            # Find earliest process init time
+            min_time = None
+            for proc in processes.values():
+                timeline = proc.get('timeline', {})
+                init_time = timeline.get('initialized', 0)
+                if init_time > 0:
+                    if min_time is None or init_time < min_time:
+                        min_time = init_time
+            
+            return min_time
+        except Exception:
+            return None
+    
+    def _load_gantt_data(self):
+        """Load process data from JSON file and populate Gantt chart."""
+        json_path = Path("eval_results/processes.json")
+        if not json_path.exists():
+            self.gantt_coord_label.setText("No process data available. Run training first.")
+            return
+            
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            
+            processes = data.get("processes", {})
+            if not processes:
+                self.gantt_coord_label.setText("No process data available.")
+                return
+            
+            # Apply current epoch range to Gantt chart
+            start_epoch, end_epoch = self._epoch_range
+            self.gantt_chart.set_epoch_range(start_epoch, end_epoch)
+            
+            # Load processes into Gantt chart
+            self.gantt_chart.load_processes(processes)
+            
+            # Count displayed processes
+            displayed = len(self.gantt_chart.process_labels)
+            total = len(processes)
+            
+            if start_epoch is not None or end_epoch is not None:
+                self.gantt_coord_label.setText(f"Showing {displayed}/{total} processes (filtered) | Epochs {start_epoch or 'start'}-{end_epoch or 'end'}")
+            else:
+                self.gantt_coord_label.setText(f"Loaded {displayed} processes | Scroll to view all")
+            
+        except Exception as e:
+            self.gantt_coord_label.setText(f"Error loading process data: {str(e)}")
+    
+    def _refresh_gantt_chart(self):
+        """Refresh the Gantt chart by reloading process data."""
+        if not self._gantt_visible:
+            return
+        
+        # Reload the data
+        self._load_gantt_data()
+        
+        # Update status to show refresh happened
+        current_text = self.gantt_coord_label.text()
+        if "Refreshed" not in current_text:
+            self.gantt_coord_label.setText(f"{current_text} | Refreshed: {QtCore.QTime.currentTime().toString('hh:mm:ss')}")
+    
+    def _on_gantt_auto_refresh_changed(self, state):
+        """Handle auto-refresh checkbox toggle."""
+        if state == QtCore.Qt.CheckState.Checked.value:
+            # Start auto-refresh timer (5 seconds)
+            self.gantt_refresh_timer.start(5000)
+        else:
+            # Stop timer
+            self.gantt_refresh_timer.stop()
+            
+    def _on_gantt_hover(self, time_x):
+        """Handle hover over Gantt chart - update coordinate label and sync crosshair."""
+        if not self._gantt_visible:
+            return
+            
+        # time_x is relative time (starting from 0), same as resource plots
+        rel_time = time_x
+        
+        # Update coordinate label
+        self.gantt_coord_label.setText(f"Time: {rel_time:.2f}s")
+        
+        # Update crosshair lines on per-second plots (they use relative time)
+        for plot, line in self._crosshair_lines:
+            line.setPos(rel_time)
+            line.show()
+            
+    def _setup_crosshair_lines(self):
+        """Setup crosshair lines for all per-second plots."""
+        # Clear existing
+        for plot, line in self._crosshair_lines:
+            plot.removeItem(line)
+        self._crosshair_lines = []
+        
+        # Create new crosshair lines
+        for plot in [self.p_cpu_sec, self.p_gpu_sec, self.p_ram_sec]:
+            line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('red', width=1, style=QtCore.Qt.PenStyle.DashLine))
+            line.hide()
+            plot.addItem(line)
+            self._crosshair_lines.append((plot, line))
+            
+    def _on_plots_scroll_changed(self, value):
+        """Handle scroll of plots area - could sync back to Gantt if needed."""
+        # This is called when the scroll area scrolls vertically
+        # Horizontal scrolling of plots is handled by the plot's view box
+        pass
 
     def _setup_attention_tab_controls(self):
 
@@ -654,6 +1256,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self.tgt_label.setText(f"<b>Target:</b> {TARGET_TEXT}")
         predicted_text = inference_stats.get("predicted_text", "<prediction unavailable>")
         bleu_val = inference_stats.get("bleu", 0.0)
+        print(f"Displaying BLEU: {bleu_val} (type: {type(bleu_val)})")
         self.pred_label.setText(f"<b>Predicted:</b> {predicted_text}")
         self.bleu_label.setText(f"<b>BLEU:</b> {bleu_val:.4f}")
         self.decoding_time.setText(f"<b>Decoding Time:</b> {inference_stats.get('decode_time', 0.0):.3f}")
@@ -740,7 +1343,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         return scroll, layout
 
     def _setup_performance_reports_tab(self):
-        """Setup the Performance Reports tab with epoch range controls and separate sections."""
+        """Setup the Performance Reports tab with epoch range controls, Gantt chart, and separate sections."""
         # Main layout for the tab
         tab_layout = QtWidgets.QVBoxLayout(self.tab_pReport)
         tab_layout.setSpacing(10)
@@ -826,6 +1429,15 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
         control_layout.addSpacing(10)
 
+        # Gantt Chart Toggle Button
+        self.gantt_toggle_btn = QtWidgets.QPushButton("📊 Toggle Gantt Chart")
+        self.gantt_toggle_btn.setStyleSheet("QPushButton { padding: 5px 15px; background-color: #9C27B0; color: white; border-radius: 3px; } QPushButton:hover { background-color: #7B1FA2; }")
+        self.gantt_toggle_btn.setCheckable(True)
+        self.gantt_toggle_btn.clicked.connect(self._toggle_gantt_chart)
+        control_layout.addWidget(self.gantt_toggle_btn)
+
+        control_layout.addSpacing(10)
+
         # Print to PDF Button
         self.print_pdf_btn = QtWidgets.QPushButton("🖨️ Print to PDF")
         self.print_pdf_btn.setStyleSheet("QPushButton { padding: 5px 15px; background-color: #FF9800; color: white; border-radius: 3px; } QPushButton:hover { background-color: #F57C00; }")
@@ -841,17 +1453,77 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
         tab_layout.addWidget(control_frame)
 
-        # --- Scroll Area for Plots ---
+        # --- Horizontal Splitter: Resource Plots (top) + Gantt Chart (bottom) ---
+        self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        tab_layout.addWidget(self.main_splitter, stretch=1)
+
+        # --- TOP: Scroll Area for Resource Plots ---
         self.scroll_pReport = QtWidgets.QScrollArea()
         self.scroll_pReport.setWidgetResizable(True)
-        tab_layout.addWidget(self.scroll_pReport)
-
+        self.scroll_pReport.horizontalScrollBar().valueChanged.connect(self._on_plots_scroll_changed)
+        
         # Content widget for scroll area
         content = QtWidgets.QWidget()
         self.scroll_layout_pReport = QtWidgets.QVBoxLayout(content)
         self.scroll_layout_pReport.setSpacing(30)
         self.scroll_layout_pReport.setContentsMargins(20, 20, 20, 20)
         self.scroll_pReport.setWidget(content)
+        self.main_splitter.addWidget(self.scroll_pReport)
+
+        # --- BOTTOM: Gantt Chart Area ---
+        self.gantt_container = QtWidgets.QWidget()
+        self.gantt_container.setMinimumHeight(150)  # Minimum height for resizing
+        gantt_layout = QtWidgets.QVBoxLayout(self.gantt_container)
+        gantt_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Gantt chart widget
+        self.gantt_chart = GanttChartWidget()
+        self.gantt_chart.sigHoverTime.connect(self._on_gantt_hover)
+        gantt_layout.addWidget(self.gantt_chart)
+        
+        # Crosshair lines for per-second plots (sync with Gantt hover)
+        self._crosshair_lines = []
+        
+        # Gantt chart control bar (refresh button + coord label)
+        gantt_control_layout = QtWidgets.QHBoxLayout()
+        
+        # Refresh button
+        self.gantt_refresh_btn = QtWidgets.QPushButton("🔄 Refresh")
+        self.gantt_refresh_btn.setStyleSheet("QPushButton { padding: 3px 10px; font-size: 10px; background-color: #2196F3; color: white; border-radius: 3px; } QPushButton:hover { background-color: #1976D2; }")
+        self.gantt_refresh_btn.setToolTip("Reload process data from file")
+        self.gantt_refresh_btn.clicked.connect(self._refresh_gantt_chart)
+        gantt_control_layout.addWidget(self.gantt_refresh_btn)
+        
+        # Auto-refresh checkbox
+        self.gantt_auto_refresh_checkbox = QtWidgets.QCheckBox("Auto")
+        self.gantt_auto_refresh_checkbox.setStyleSheet("font-size: 10px;")
+        self.gantt_auto_refresh_checkbox.setToolTip("Auto-refresh every 5 seconds when visible")
+        self.gantt_auto_refresh_checkbox.stateChanged.connect(self._on_gantt_auto_refresh_changed)
+        gantt_control_layout.addWidget(self.gantt_auto_refresh_checkbox)
+        
+        gantt_control_layout.addStretch(1)
+        
+        # Coordinate label at bottom left of Gantt
+        self.gantt_coord_label = QtWidgets.QLabel("Time: -- | Process: --")
+        self.gantt_coord_label.setStyleSheet("font-size: 10px; color: #666; padding: 2px 5px;")
+        gantt_control_layout.addWidget(self.gantt_coord_label)
+        
+        gantt_layout.addLayout(gantt_control_layout)
+        
+        # Initially hide Gantt chart
+        self.gantt_container.hide()
+        self.main_splitter.addWidget(self.gantt_container)
+        
+        # Timer for Gantt chart auto-refresh
+        self.gantt_refresh_timer = QtCore.QTimer()
+        self.gantt_refresh_timer.timeout.connect(self._refresh_gantt_chart)
+
+        # Set initial splitter sizes (plots on top, Gantt hidden)
+        self.main_splitter.setSizes([800, 0])
+        
+        # Set stretch factors so both widgets can be resized
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 1)
 
         # --- Section 1: Per-Second Resource Usage ---
         per_sec_frame = QtWidgets.QGroupBox("Per-Second Resource Usage (High Resolution)")
@@ -873,6 +1545,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         self._epoch_range = (None, None)  # (start, end)
         self._live_mode = False  # Live mode flag
         self._data_loaded = False  # Flag to track if user has made a selection
+        self._gantt_visible = False
 
     def _setup_linguistic_report_tab(self):
         """Setup the Linguistic Performance Report tab with print button."""
@@ -1001,6 +1674,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             # Clear cache to force reload with new filter
             self._cached_df = None
             self._update_plots_once()
+            
+            # Reload Gantt chart with new range if visible
+            if self._gantt_visible:
+                self._load_gantt_data()
 
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter valid integer epoch numbers.")
@@ -1032,6 +1709,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
         
         self._cached_df = None
         self._update_plots_once()
+        
+        # Reload Gantt chart with all epochs if visible
+        if self._gantt_visible:
+            self._load_gantt_data()
 
     def _on_live_mode_changed(self, state):
         """Handle live mode toggle."""
@@ -1213,14 +1894,32 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             plot.getAxis("left").setLabel("Value")
         
         line = plot.plot(pen=pg.mkPen(color, width=2))
+        
+        # Add coordinate label at bottom left
+        coord_label = QtWidgets.QLabel("Time: -- | Value: --")
+        coord_label.setStyleSheet("font-size: 9px; color: #666; background-color: rgba(255,255,255,0.8); padding: 2px 5px;")
+        
+        # Enable hover events for coordinate tracking
+        plot.scene().sigMouseMoved.connect(lambda pos, p=plot, l=coord_label: self._on_plot_mouse_moved(pos, p, l))
+        plot.scene().sigMouseHover.connect(lambda items, l=coord_label: l.setText("Time: -- | Value: --") if not items else None)
 
         vbox.addWidget(plot)
+        vbox.addWidget(coord_label)
         layout.addWidget(frame)
         
         # Store reference to point count label for updates
         setattr(self, f"_point_count_label_{plot_id}", point_count_label)
+        setattr(self, f"_coord_label_{plot_id}", coord_label)
         
         return plot, line, sampling_combo
+        
+    def _on_plot_mouse_moved(self, pos, plot, label):
+        """Handle mouse movement over a plot to update coordinate label."""
+        if plot.sceneBoundingRect().contains(pos):
+            mouse_point = plot.getViewBox().mapSceneToView(pos)
+            x = mouse_point.x()
+            y = mouse_point.y()
+            label.setText(f"Time: {x:.2f}s | Value: {y:.2f}")
 
     def _on_sampling_changed(self):
         """Handler called when sampling rate changes. Updates the plots."""
@@ -1313,7 +2012,13 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
                     self._clear_per_second_plots()
                     return
 
-                df["time"] -= df["time"].iloc[0]
+                # Use earliest process init time as reference (to sync with Gantt chart)
+                # Falls back to first CSV entry if process data not available
+                process_min_time = self._get_process_min_time()
+                if process_min_time is not None:
+                    df["time"] -= process_min_time
+                else:
+                    df["time"] -= df["time"].iloc[0]
 
                 # Cache the processed dataframe
                 self._cached_df = df
@@ -1370,7 +2075,7 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
 
         except Exception as e:
             print("Update error:", e)
-
+            
     def _update_average_plots(self):
         """Update the average per-epoch plots. Always shown regardless of per-second selection."""
         try:
@@ -1425,6 +2130,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             with open("eval_results/eval_metrics.json", "r") as f:
                 data = json.load(f)
             df = pd.DataFrame(data)
+            
+            # Rename columns for consistency
+            column_mapping = {"cer": "CER", "wer": "WER", "bleu": "BLEU", "loss": "Loss"}
+            df.rename(columns=column_mapping, inplace=True)
 
             for col in ["epoch", "CER", "WER", "BLEU"]:
                 if col not in df.columns:
@@ -1433,6 +2142,10 @@ class ResourceMonitorApp(QtWidgets.QMainWindow):
             self.line_cer.setData(df["epoch"], df["CER"])
             self.line_wer.setData(df["epoch"], df["WER"])
             self.line_bleu.setData(df["epoch"], df["BLEU"])
+            
+            # Update loss line if available
+            if "Loss" in df.columns:
+                self.line_loss.setData(df["epoch"], df["Loss"])
 
             self.plot_linguistic.setLabel("left", "Score")
             self.plot_linguistic.setLabel("bottom", "Epoch")

@@ -13,10 +13,16 @@ def get_config():
         "model_basename": "tmodel_",
         "preload": "28",
         "tokenizer_file": "tokenizer_{0}.json",
-        "experiment_name": "runs/tmodel"
+        "experiment_name": "runs/tmodel",
+        "preload": 0,
+        "tokenizer_file": "tokenizer_{0}.json",
+        "experiment_name": "runs/tmodel",
+        "eval_logging": "eval_results/eval_metrics.json",
+        "resource_logging": "eval_results/resource_usage",
+        "datasource": 'opus_books'
     }
 
-def get_weights_file_path(config, epoch:str):
+def get_weights_file_path(config, epoch: int):
     model_folder = config['model_folder']
     model_basename = config['model_basename']
     model_filename = f"{model_basename}{epoch}.pt"
@@ -31,3 +37,11 @@ def latest_weights_file_path(config):
         return None
     weights_files.sort()
     return str(weights_files[-1])
+
+def get_epoch_from_file(config, filename: str):
+    epoch = filename
+    epoch = epoch.split('/')[-1]
+    epoch = epoch.split('.')[0]
+    epoch = epoch.split(config['model_basename'])[-1]
+    return epoch
+  

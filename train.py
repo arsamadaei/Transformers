@@ -140,7 +140,7 @@ class ResourceLogger:
 
 EVAL_RESULTS_DIR = "eval_results"
 
-def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
+def save_eval_metrics(epoch, bleu, cer, wer, loss, samples, config):
     results_file = Path(config.get("eval_results_file", "eval_results/eval_metrics.json"))
     Path(EVAL_RESULTS_DIR).mkdir(parents=True, exist_ok=True)
     results_file.parent.mkdir(parents=True, exist_ok=True)
@@ -149,6 +149,7 @@ def save_eval_metrics(epoch, bleu, cer, wer, samples, config):
         "bleu": float(bleu),
         "cer": float(cer),
         "wer": float(wer),
+        "loss": float(loss),
         "samples": samples
     }
    
@@ -208,7 +209,7 @@ def run_validation(model,
                    validation_ds,
                    tokenizer_src, tokenizer_tgt,
                    max_len, print_msg, global_step,
-                   writer, device, num_examples=2):
+                   writer, device, config, epoch, avg_loss, num_examples=2):
     model.eval()
     count = 0
 
@@ -270,8 +271,10 @@ def run_validation(model,
         writer.flush()
 
         # Compute the BLEU metric
+        # BLEUScore expects target to be a list of lists (multiple refs per prediction allowed)
         metric = torchmetrics.BLEUScore()
-        bleu = metric(predicted, expected)
+        expected_refs = [[t] for t in expected]  # Wrap each reference in a list
+        bleu = metric(predicted, expected_refs)
         writer.add_scalar('validation BLEU', bleu, global_step)
         # --- Tokenize input for BLEU ---
         def tokenize_bleu(s):
@@ -294,6 +297,17 @@ def run_validation(model,
         writer.flush()
     
     else: print(f'IM GONNA LICK YOUR PENAR')
+    
+    # Save evaluation metrics to JSON (including loss)
+    samples = [
+        {
+            "source": source_texts[i] if i < len(source_texts) else "",
+            "target": expected[i] if i < len(expected) else "",
+            "predicted": predicted[i] if i < len(predicted) else ""
+        }
+        for i in range(min(num_examples, len(predicted)))
+    ]
+    save_eval_metrics(epoch, bleu, cer, wer, avg_loss, samples, config)
 
 def get_all_sentences(ds, lang):
     for item in ds:
@@ -393,18 +407,30 @@ def train_model(config):
         epochTime = time.time()
         epochProcess = Process(f"train_epoch_{epoch:02d}", epochTime, epoch=epoch)
         parentProcess.add_subtask(epochProcess)
+        
+        # Set global epoch for forward pass tracking in transformer
+        from Transformer_from_scratch import set_training_epoch
+        set_training_epoch(epoch, epochProcess)
         #--------------------
         
         torch.cuda.empty_cache()
+        
+        # Track cumulative loss for the epoch
+        epoch_loss_sum = 0.0
+        num_batches = 0
+        
         batch_iterator = tqdm(train_dataloader, desc=f'processing epoch {epoch:02d}')
-        run_validation(model, val_dataloader,
-                        tokenizer_src, tokenizer_tgt,
-                        config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer, device)
 
         model.train()
-
+        batch_counter = 0
 
         for batch in batch_iterator:
+            # Set batch ID for data flow tracking
+            batch_id = f"B{batch_counter:04d}"
+            from Transformer_from_scratch import set_training_epoch
+            set_training_epoch(epoch, epochProcess, batch_id)
+            batch_counter += 1
+            
             encoder_input = batch['encoder_input'].to(device)
             decoder_input = batch['decoder_input'].to(device)
             encoder_mask = batch['encoder_mask'].to(device)
@@ -420,6 +446,10 @@ def train_model(config):
             # Log the loss
             loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
             batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
+            
+            # Accumulate loss for epoch average
+            epoch_loss_sum += loss.item()
+            num_batches += 1
 
             writer.add_scalar('train loss', loss.item(), global_step)
 
@@ -431,6 +461,14 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
+        
+        # Calculate average loss for the epoch
+        avg_epoch_loss = epoch_loss_sum / num_batches if num_batches > 0 else 0.0
+        
+        # Run validation and save metrics (including loss)
+        run_validation(model, val_dataloader,
+                        tokenizer_src, tokenizer_tgt,
+                        config['seq_len'], lambda msg: batch_iterator.write(msg), global_step, writer, device, config, epoch, avg_epoch_loss)
 
         # Process modification for epoch
         #---------------------
