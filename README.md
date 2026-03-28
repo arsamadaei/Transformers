@@ -30,7 +30,7 @@ If the sheets have slightly different patterns, which is achieved in my image by
 What I can do, is calculate and print some of the matrices created by my Transformer model (Figure 3), and give each number of the matrix a slightly different pattern, and lay the resulting patterned sheets on top of eachother achieving a relatively accurate presentation of the matrix multiplication and its activation in the model.
 
 ![Figure 2: This is how the attention scores are produced](News/Images/KQV.png)
-
+ 
 # Transformer from Scratch
 
 An implementation of the Transformer architecture from the paper ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) for English-to-French translation.
