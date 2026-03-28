@@ -27,7 +27,6 @@ import psutil
 import torch
 import csv
 import time
-from pathlib import Path
 import threading
 import pandas as pd
 from processes import Process
@@ -293,7 +292,6 @@ def run_validation(model,
         writer.add_scalar('validation BLEU', float(bleu), global_step)
         writer.flush()
     
-    else: print(f'IM GONNA LICK YOUR PENAR')
 
 def get_all_sentences(ds, lang):
     for item in ds:

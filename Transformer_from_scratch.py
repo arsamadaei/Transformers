@@ -277,6 +277,9 @@ class MultiHeadAttentionBlock(nn.Module):
         self.w_v = nn.Linear(d_model, d_model, bias=False) # Wv
         self.w_o = nn.Linear(d_model, d_model, bias=False) # Wo
         self.dropout = nn.Dropout(dropout)
+        self.K = None
+        self.Q = None
+        self.V = None
 
         # Process modification
         #--------------------
@@ -311,7 +314,9 @@ class MultiHeadAttentionBlock(nn.Module):
 
         # Calculate attention
         x, self.attention_scores = MultiHeadLatentAttentionBlock.attention(query, key, value, mask, self.dropout)
-        
+        self.K = key
+        self.Q = query
+        self.V = value
         # Combine all the heads together
         # (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
         x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
@@ -323,7 +328,7 @@ class MultiHeadAttentionBlock(nn.Module):
         
 class EncoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
@@ -338,7 +343,7 @@ class EncoderBlock(nn.Module):
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer, parent_process=self.__p0) for _ in range(2)])
-        self.__p0.add_subtask(self_attention_block._MultiHeadLatentAttentionBlock__p0)
+        self.__p0.add_subtask(self_attention_block._MultiHeadAttentionBlock__p0)
         self.__p0.add_subtask(feed_forward_block._FeedForwardBlock__p0)
 
         # Process modification
@@ -383,7 +388,7 @@ class Encoder(nn.Module):
 
 class DecoderBlock(nn.Module):
 
-    def __init__(self, features: int, self_attention_block: MultiHeadLatentAttentionBlock, cross_attention_block: MultiHeadLatentAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float, layer: int = 0, parent_process=None) -> None:
         # Process creation
         # -------------------
         exeTime = time.time()
@@ -399,8 +404,8 @@ class DecoderBlock(nn.Module):
         self.cross_attention_block = cross_attention_block
         self.feed_forward_block = feed_forward_block
         self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout, layer=layer, parent_process=self.__p0) for _ in range(3)])
-        self.__p0.add_subtask(self_attention_block._MultiHeadLatentAttentionBlock__p0)
-        self.__p0.add_subtask(cross_attention_block._MultiHeadLatentAttentionBlock__p0)
+        self.__p0.add_subtask(self_attention_block._MultiHeadAttentionBlock__p0)
+        self.__p0.add_subtask(cross_attention_block._MultiHeadAttentionBlock__p0)
         self.__p0.add_subtask(feed_forward_block._FeedForwardBlock__p0)
 
         # Process modification
@@ -542,7 +547,7 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     # Create the encoder blocks
     encoder_blocks = []
     for layer_idx in range(N):
-        encoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        encoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout, layer=layer_idx)
         feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout, layer=layer_idx)
         encoder_block = EncoderBlock(d_model, encoder_self_attention_block, feed_forward_block, dropout, layer=layer_idx)
         encoder_blocks.append(encoder_block)
@@ -550,8 +555,8 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     # Create the decoder blocks
     decoder_blocks = []
     for layer_idx in range(N):
-        decoder_self_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
-        decoder_cross_attention_block = MultiHeadLatentAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout, layer=layer_idx)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout, layer=layer_idx)
         feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout, layer=layer_idx)
         decoder_block = DecoderBlock(d_model, decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout, layer=layer_idx)
         decoder_blocks.append(decoder_block)
