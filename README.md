@@ -1,12 +1,36 @@
 ```
- ████████╗██████╗  █████╗ ███╗   ██╗███████╗██╗      █████╗ ████████╗ ██████╗ ██████╗                      
- ╚══██╔══╝██╔══██╗██╔══██╗████╗  ██║██╔════╝██║     ██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗                     
+ ████████╗██████╗  █████╗ ███╗   ██╗███████╗██╗      █████╗ ████████╗ ██████╗ ██████╗
+  ╚═██╔═╝ ██╔══██╗██╔══██╗████╗  ██║██╔════╝██║     ██╔══██╗╚══██╔══╝██╔═══██╗██╔══██╗                     
     ██║   ██████╔╝███████║██╔██╗ ██║███████╗██║     ███████║   ██║   ██║   ██║██████╔╝                     
     ██║   ██╔══██╗██╔══██║██║╚██╗██║╚════██║██║     ██╔══██║   ██║   ██║   ██║██╔══██╗                     
     ██║   ██║  ██║██║  ██║██║ ╚████║███████║███████╗██║  ██║   ██║   ╚██████╔╝██║  ██║                     
     ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝                     
 ```
 
+# NEWS
+## I am working on a new video for my OpenML channel (March 28, 2026)
+After spending about a semester studying AI after my lectures, I now have the understanding and visual tools necessary for demystifying the mathematics behind Google's Attention mechanism in the transformer model.
+
+### A peak into what I have learned
+The challenge of designing AI models is the predictablility of its outcome. The shear amount of data that we feed into a neural network model is beyond our comprehension. On one hand, a neural network is much less efficient at learning that we humans are. For a translator model for example, it can take up to [**trillions** of tokens](https://huggingface.co/deepseek-ai/DeepSeek-V3#:~:text=We%20pre%2Dtrain%20DeepSeek%2DV3,to%20fully%20harness%20its%20capabilities.) and sentences to train an accurate translator model such as google's translator model, this is many orders of magnitude more words than we humans speak throughout our entire lives, and yet we can learn multiple languages with orders of magnitude less data. So managing this much training data, and designing an AI model with a learning outcome emerging to an expected result is very difficult. Making the neural network is the easy part of designing AI models. Designing a machine that creates predictable outcomes however, is much more complex.
+
+The main method that Google's Transformer model uses to tackle this challenge, is with its attention mechanism. This mechanism is at every step of the model's functions and it operates on a mathematical model that guides the neural network to achieve an expected learning outcome. The mathematics of this machine is what I am aiming to explain and visualize in my upcoming video where once more I have managed to find a 3d model design that can aid its visualization!
+
+### Visualizing the matrix multiplication
+The attention mechanism relies on matrix multiplications, which are essentially batches of dot products (Figure 1). In a geometric sense, the dot product acts as a similarity metric that measures the alignment between two vectors. 
+![Figure 1: This is how the attention scores are produced](News/Images/ATM.jpg)
+
+Specifically, a higher dot product indicates that two vectors are pointing in a similar direction in the embedding space, signaling to the model that these tokens are contextually related. It is simple to visualize using 3d models, two vectors to signify the affects of the dot product. It is much more difficult to create an analogous visualization that directly signifies the affects of matrx multiplications on activation patterns, and that was what I had aimed to do. 
+
+After months of thinking I stumbled upon my answer when designing and 3d printing a gift for my mom. Part of the design included two patterned sheets for asthetics. When I was printing the batch, I took the sheets and began playing around and sliding them on top of eachother. This is when I realized that a patterned sheet is perfect for visualizing the matrix dot products. If we have two matrices constructed from an input sentence whose dot products resemble their similarity, if there are regions of high similarity in the dot product, when the result reaches the neural network of the model, it will create activations in those specific areas/dimensions of similarity, which help the model find the contextual meaning of the sentence it is given.
+I realized I can achieve a visualization of this concept by laying two patterened sheets on top of eachother(Figure 2). If the sheets have the exact same pattern, which is achieved here by placing them directly on top of eachtoer, we can see the background which is the surface where the sheets are placed. This resembles high activation across all areas when calculating the product of two exact matrices.
+If the sheets have slightly different patterns, which is achieved in my image by placing the two sheets on top of eachother at different angles, there are some areas (which I circled) of high activation.
+![Figure 2: This is how the attention scores are produced](News/Images/VizTool.jpg)
+
+What I can do, is calculate and print some of the matrices created by my Transformer model (Figure 3), and give each number of the matrix a slightly different pattern, and lay the resulting patterned sheets on top of eachother achieving a relatively accurate presentation of the matrix multiplication and its activation in the model.
+
+![Figure 2: This is how the attention scores are produced](News/Images/KQV.png)
+ 
 # Transformer from Scratch
 
 An implementation of the Transformer architecture from the paper ["Attention Is All You Need"](https://arxiv.org/abs/1706.03762) for English-to-French translation.
